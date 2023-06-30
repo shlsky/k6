@@ -74,6 +74,8 @@ func optionFlagSet() *pflag.FlagSet {
 		"Milliseconds are assumed if no unit is provided.\n"+
 		"Possible select values to return a single IP are: 'first', 'random' or 'roundRobin'.\n"+
 		"Possible policy values are: 'preferIPv4', 'preferIPv6', 'onlyIPv4', 'onlyIPv6' or 'any'.\n")
+	flags.String("cpu-prof", "", "cpu prof file")
+	flags.String("mem-prof", "", "mem prof file")
 	return flags
 }
 
@@ -235,6 +237,24 @@ func getOptions(flags *pflag.FlagSet) (lib.Options, error) {
 
 	if redirectConFile != "" {
 		opts.ConsoleOutput = null.StringFrom(redirectConFile)
+	}
+
+	cpuProf, err := flags.GetString("cpu-prof")
+	if err != nil {
+		return opts, err
+	}
+
+	if cpuProf != "" {
+		opts.CpuProf = null.StringFrom(cpuProf)
+	}
+
+	memProf, err := flags.GetString("mem-prof")
+	if err != nil {
+		return opts, err
+	}
+
+	if memProf != "" {
+		opts.MemProf = null.StringFrom(memProf)
 	}
 
 	if dns, err := flags.GetString("dns"); err != nil {

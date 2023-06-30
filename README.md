@@ -101,6 +101,11 @@ If you want to contribute or help with the development of k6, start by reading [
 
 To get help, report bugs, suggest features, and discuss k6 with others, refer to [SUPPORT.md](SUPPORT.md).
 
+go build main.go
+./main run --cpu-prof=cpu_pprof.prof --mem-prof=mem_pprof.prof  grpc.js
+go tool pprof mem_pprof.prof
+
+
 ## License
 
 k6 is distributed under the [AGPL-3.0 license](https://github.com/grafana/k6/blob/master/LICENSE.md).

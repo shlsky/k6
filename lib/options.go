@@ -330,6 +330,12 @@ type Options struct {
 
 	// Specify client IP ranges and/or CIDR from which VUs will make requests
 	LocalIPs types.NullIPPool `json:"-" envconfig:"K6_LOCAL_IPS"`
+
+	// Redirect console logging to a file
+	CpuProf null.String
+
+	// Redirect console logging to a file
+	MemProf null.String
 }
 
 // Returns the result of overwriting any fields with any that are set on the argument.
@@ -409,6 +415,12 @@ func (o Options) Apply(opts Options) Options {
 	}
 	if opts.UserAgent.Valid {
 		o.UserAgent = opts.UserAgent
+	}
+	if opts.CpuProf.Valid {
+		o.CpuProf = opts.CpuProf
+	}
+	if opts.MemProf.Valid {
+		o.MemProf = opts.MemProf
 	}
 	if opts.Batch.Valid {
 		o.Batch = opts.Batch

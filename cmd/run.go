@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,6 +81,42 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 
 	// Write the full consolidated *and derived* options back to the Runner.
 	conf := test.derivedConfig
+
+	// cpu prof
+	if conf.CpuProf.Valid {
+		logger.Info("conf------" + conf.CpuProf.String)
+		f, err1 := os.Create(conf.CpuProf.String)
+		if err1 != nil {
+			logger.Error(fmt.Errorf("could not start CPU profile: %s", err1))
+		}
+		if err1 := pprof.StartCPUProfile(f); err1 != nil {
+			runtime.SetCPUProfileRate(10000)
+			logger.Error(fmt.Errorf("could not start CPU profile: %s", err1))
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+			logger.Info(fmt.Sprintf("end-----------: %s", conf.CpuProf.String))
+		}()
+	}
+
+	// mem prof
+	if conf.MemProf.Valid {
+		logger.Info("conf------" + conf.MemProf.String)
+		f1, err1 := os.Create(conf.MemProf.String)
+		if err1 != nil {
+			logger.Error(fmt.Errorf("could not start MEM profile: %s", err1))
+		}
+		if err1 := pprof.WriteHeapProfile(f1); err1 != nil {
+			logger.Error(fmt.Errorf("could not start MEM profile: %s", err1))
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f1.Close()
+			logger.Info(fmt.Errorf("end-----------: %s", ""))
+		}()
+	}
+
 	testRunState, err := test.buildTestRunState(conf.Options)
 	if err != nil {
 		return err
