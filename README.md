@@ -103,8 +103,16 @@ To get help, report bugs, suggest features, and discuss k6 with others, refer to
 
 go build main.go
 ./main run --cpu-prof=cpu_pprof.prof --mem-prof=mem_pprof.prof  grpc.js
-go tool pprof mem_pprof.prof
+ go tool pprof mem_pprof.prof
 
+打上版本号
+░▒▓    ~/github/k6    master  git tag -a v0.45.1 -m "增加cpu mem pprof"                                                                                                                                                                                                             1 ✘  3s   18:12:01  ▓▒░
+
+░▒▓    ~/github/k6    master  git push origin v0.45.1    
+替换k6的仓库
+export XK6_K6_REPO=github.com/shlsky/k6
+
+xk6  build v0.45.1 --with  github.com/shlsky/xk6-grpc@v0.0.9 --with github.com/avitalique/xk6-file@latest  --with github.com/mostafa/xk6-kafka@v0.15.1 --with github.com/grafana/xk6-redis
 
 ## License
 
