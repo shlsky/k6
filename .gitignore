@@ -29,3 +29,4 @@
 
 /packaging/.env
 /packaging/*.gpg
+/main
