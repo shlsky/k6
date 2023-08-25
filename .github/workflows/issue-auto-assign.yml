@@ -1,5 +1,7 @@
-name: 'Auto assign maintainer to issue'
+name: "Auto assign maintainer to issue"
 on:
+  # makes this workflow re-usable
+  workflow_call:
   issues:
     types: [opened]
 
@@ -13,17 +15,34 @@ jobs:
       - uses: actions/github-script@v6
         with:
           script: |
-            const assignees = ['mstoykov', 'imiric', 'codebien', 'olegbespalov', 'oleiade'];
+            const assignees = ['mstoykov', 'codebien', 'olegbespalov', 'oleiade'];
             const assigneeCount = 1;
 
             // Do not automatically assign users if someone was already assigned or it was opened by a maintainer
             if (context.payload.issue.assignees.length > 0 || assignees.includes(context.payload.issue.user.login)) {
               return;
             }
+            const crypto = require("node:crypto");
+
+            const getNRandom = (n, array) => {
+              let result = new Array();
+              for (;n > 0 && array.length > 0; n--) {
+                const chosen = array[crypto.randomInt(array.length)];
+                result.push(chosen);
+                array = array.filter(el => el != chosen);
+              }
+              return result;
+            }
 
             github.rest.issues.addAssignees({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              assignees: assignees.sort(() => 0.5 - Math.random()).slice(0, assigneeCount),
+              assignees: getNRandom(assigneeCount, assignees),
+            });
+            github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["triage"]
             });
