@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"gopkg.in/guregu/null.v3"
-
 	"github.com/mstoykov/envconfig"
-
 	"go.k6.io/k6/lib/types"
+	"gopkg.in/guregu/null.v3"
 )
 
 // Config holds all the necessary data and options for sending metrics to the k6 Cloud.
@@ -24,16 +22,20 @@ type Config struct {
 	Timeout types.NullDuration `json:"timeout" envconfig:"K6_CLOUD_TIMEOUT"`
 
 	LogsTailURL    null.String `json:"-" envconfig:"K6_CLOUD_LOGS_TAIL_URL"`
-	PushRefID      null.String `json:"pushRefID" envconfig:"K6_CLOUD_PUSH_REF_ID"`
 	WebAppURL      null.String `json:"webAppURL" envconfig:"K6_CLOUD_WEB_APP_URL"`
 	TestRunDetails null.String `json:"testRunDetails" envconfig:"K6_CLOUD_TEST_RUN_DETAILS"`
 	NoCompress     null.Bool   `json:"noCompress" envconfig:"K6_CLOUD_NO_COMPRESS"`
 	StopOnError    null.Bool   `json:"stopOnError" envconfig:"K6_CLOUD_STOP_ON_ERROR"`
 	APIVersion     null.Int    `json:"apiVersion" envconfig:"K6_CLOUD_API_VERSION"`
 
-	// TODO: rename the config field to align to the new logic by time series
-	// when the migration from the version 1 is completed.
-	MaxMetricSamplesPerPackage null.Int `json:"maxMetricSamplesPerPackage" envconfig:"K6_CLOUD_MAX_METRIC_SAMPLES_PER_PACKAGE"`
+	// Defines the max allowed number of time series in a single batch.
+	MaxTimeSeriesInBatch null.Int `json:"maxTimeSeriesInBatch" envconfig:"K6_CLOUD_MAX_TIME_SERIES_IN_BATCH"`
+
+	// PushRefID represents the test run id.
+	// Note: It is a legacy name used by the backend, the code in k6 open-source
+	// references it as test run id.
+	// Currently, a renaming is not planned.
+	PushRefID null.String `json:"pushRefID" envconfig:"K6_CLOUD_PUSH_REF_ID"`
 
 	// The time interval between periodic API calls for sending samples to the cloud ingest service.
 	MetricPushInterval types.NullDuration `json:"metricPushInterval" envconfig:"K6_CLOUD_METRIC_PUSH_INTERVAL"`
@@ -46,6 +48,9 @@ type Config struct {
 
 	// The host of the k6 Insights backend service.
 	TracesHost null.String `json:"traceHost" envconfig:"K6_CLOUD_TRACES_HOST"`
+
+	// This is how many concurrent pushes will be done at the same time to the cloud
+	TracesPushConcurrency null.Int `json:"tracesPushConcurrency" envconfig:"K6_CLOUD_TRACES_PUSH_CONCURRENCY"`
 
 	// The time interval between periodic API calls for sending samples to the cloud ingest service.
 	TracesPushInterval types.NullDuration `json:"tracesPushInterval" envconfig:"K6_CLOUD_TRACES_PUSH_INTERVAL"`
@@ -150,6 +155,9 @@ type Config struct {
 
 	// Connection or request times with how many IQRs above Q3 to consier as non-aggregatable outliers.
 	AggregationOutlierIqrCoefUpper null.Float `json:"aggregationOutlierIqrCoefUpper" envconfig:"K6_CLOUD_AGGREGATION_OUTLIER_IQR_COEF_UPPER"`
+
+	// Deprecated: Remove this when migration from the cloud output v1 will be completed
+	MaxMetricSamplesPerPackage null.Int `json:"maxMetricSamplesPerPackage" envconfig:"K6_CLOUD_MAX_METRIC_SAMPLES_PER_PACKAGE"`
 }
 
 // NewConfig creates a new Config instance with default values for some fields.
@@ -161,13 +169,19 @@ func NewConfig() Config {
 		MetricPushInterval:    types.NewNullDuration(1*time.Second, false),
 		MetricPushConcurrency: null.NewInt(1, false),
 
-		TracesEnabled:      null.NewBool(false, false),
-		TracesHost:         null.NewString("insights.k6.io:4443", false),
-		TracesPushInterval: types.NewNullDuration(1*time.Second, false),
+		TracesEnabled:         null.NewBool(false, false),
+		TracesHost:            null.NewString("insights.k6.io:4443", false),
+		TracesPushInterval:    types.NewNullDuration(1*time.Second, false),
+		TracesPushConcurrency: null.NewInt(1, false),
 
 		MaxMetricSamplesPerPackage: null.NewInt(100000, false),
 		Timeout:                    types.NewNullDuration(1*time.Minute, false),
 		APIVersion:                 null.NewInt(1, false),
+
+		// The set value (1000) is selected for performance reasons.
+		// Any change to this value should be first discussed with internal stakeholders.
+		MaxTimeSeriesInBatch: null.NewInt(1000, false),
+
 		// Aggregation is disabled by default, since AggregationPeriod has no default value
 		// but if it's enabled manually or from the cloud service, those are the default values it will use:
 		AggregationCalcInterval:         types.NewNullDuration(3*time.Second, false),
@@ -225,6 +239,9 @@ func (c Config) Apply(cfg Config) Config {
 	if cfg.MaxMetricSamplesPerPackage.Valid {
 		c.MaxMetricSamplesPerPackage = cfg.MaxMetricSamplesPerPackage
 	}
+	if cfg.MaxTimeSeriesInBatch.Valid {
+		c.MaxTimeSeriesInBatch = cfg.MaxTimeSeriesInBatch
+	}
 	if cfg.MetricPushInterval.Valid {
 		c.MetricPushInterval = cfg.MetricPushInterval
 	}
@@ -239,6 +256,9 @@ func (c Config) Apply(cfg Config) Config {
 	}
 	if cfg.TracesPushInterval.Valid {
 		c.TracesPushInterval = cfg.TracesPushInterval
+	}
+	if cfg.TracesPushConcurrency.Valid {
+		c.TracesPushConcurrency = cfg.TracesPushConcurrency
 	}
 	if cfg.AggregationPeriod.Valid {
 		c.AggregationPeriod = cfg.AggregationPeriod

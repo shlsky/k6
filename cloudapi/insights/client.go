@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
+	"time"
 
+	grpcRetry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
@@ -32,15 +36,18 @@ var (
 // ClientConfig is the configuration for the client.
 type ClientConfig struct {
 	IngesterHost  string
+	Timeout       time.Duration
 	ConnectConfig ClientConnectConfig
 	AuthConfig    ClientAuthConfig
 	TLSConfig     ClientTLSConfig
+	RetryConfig   ClientRetryConfig
 }
 
 // ClientConnectConfig is the configuration for the client connection.
 type ClientConnectConfig struct {
 	Block                  bool
 	FailOnNonTempDialError bool
+	Timeout                time.Duration
 	Dialer                 func(context.Context, string) (net.Conn, error)
 }
 
@@ -58,12 +65,60 @@ type ClientTLSConfig struct {
 	CertFile string
 }
 
+// ClientRetryConfig is the configuration for the client retries.
+type ClientRetryConfig struct {
+	RetryableStatusCodes string
+	MaxAttempts          uint
+	PerRetryTimeout      time.Duration
+	BackoffConfig        ClientBackoffConfig
+}
+
+// ClientBackoffConfig is the configuration for the client retries using the backoff exponential with jitter algorithm.
+type ClientBackoffConfig struct {
+	Enabled        bool
+	JitterFraction float64
+	WaitBetween    time.Duration
+}
+
 // Client is the client for the k6 Insights ingester service.
 type Client struct {
 	cfg    ClientConfig
 	client ingester.IngesterServiceClient
 	conn   *grpc.ClientConn
 	connMu *sync.RWMutex
+}
+
+// NewDefaultClientConfigForTestRun creates a new default client config for a test run.
+func NewDefaultClientConfigForTestRun(ingesterHost, authToken string, testRunID int64) ClientConfig {
+	return ClientConfig{
+		IngesterHost: ingesterHost,
+		Timeout:      90 * time.Second,
+		ConnectConfig: ClientConnectConfig{
+			Block:                  false,
+			FailOnNonTempDialError: false,
+			Timeout:                10 * time.Second,
+			Dialer:                 nil,
+		},
+		AuthConfig: ClientAuthConfig{
+			Enabled:                  true,
+			TestRunID:                testRunID,
+			Token:                    authToken,
+			RequireTransportSecurity: true,
+		},
+		TLSConfig: ClientTLSConfig{
+			Insecure: false,
+		},
+		RetryConfig: ClientRetryConfig{
+			RetryableStatusCodes: `"UNKNOWN","INTERNAL","UNAVAILABLE","DEADLINE_EXCEEDED"`,
+			MaxAttempts:          3,
+			PerRetryTimeout:      30 * time.Second,
+			BackoffConfig: ClientBackoffConfig{
+				Enabled:        true,
+				JitterFraction: 0.1,
+				WaitBetween:    1 * time.Second,
+			},
+		},
+	}
 }
 
 // NewClient creates a new client.
@@ -90,6 +145,8 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("failed to create dial options: %w", err)
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.ConnectConfig.Timeout)
+	defer cancel()
 	conn, err := grpc.DialContext(ctx, c.cfg.IngesterHost, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to dial: %w", err)
@@ -119,9 +176,8 @@ func (c *Client) IngestRequestMetadatasBatch(ctx context.Context, requestMetadat
 		return fmt.Errorf("failed to create request from request metadatas: %w", err)
 	}
 
-	// TODO(lukasz, retry-support): Retry request with returned metadatas.
-	//
-	// Note: There is currently no backend support backing up this retry mechanism.
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
+	defer cancel()
 	_, err = c.client.BatchCreateRequestMetadatas(ctx, req)
 	if err != nil {
 		st := status.Convert(err)
@@ -180,7 +236,52 @@ func dialOptionsFromClientConfig(cfg ClientConfig) ([]grpc.DialOption, error) {
 		opts = append(opts, grpc.WithPerRPCCredentials(newPerRPCCredentials(cfg.AuthConfig)))
 	}
 
+	rI, err := retryInterceptor(cfg.RetryConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create retry interceptors: %w", err)
+	}
+
+	opts = append(opts, grpc.WithChainUnaryInterceptor([]grpc.UnaryClientInterceptor{rI}...))
+
 	return opts, nil
+}
+
+func retryInterceptor(retryConfig ClientRetryConfig) (grpc.UnaryClientInterceptor, error) {
+	rSC, err := retryableStatusCodes(retryConfig.RetryableStatusCodes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse retryable status codes: %w", err)
+	}
+	withCodes := grpcRetry.WithCodes(rSC...)
+	withMax := grpcRetry.WithMax(retryConfig.MaxAttempts)
+	withPerRetryTimeout := grpcRetry.WithPerRetryTimeout(retryConfig.PerRetryTimeout)
+	callOptions := []grpcRetry.CallOption{withCodes, withMax, withPerRetryTimeout}
+
+	backoffConfig := retryConfig.BackoffConfig
+	if backoffConfig.Enabled {
+		backoff := grpcRetry.WithBackoff(
+			grpcRetry.BackoffExponentialWithJitter(backoffConfig.WaitBetween, backoffConfig.JitterFraction))
+		callOptions = append(callOptions, backoff)
+	}
+
+	unaryInterceptor := grpcRetry.UnaryClientInterceptor(callOptions...)
+	return unaryInterceptor, nil
+}
+
+func retryableStatusCodes(retryableStatusCodes string) ([]codes.Code, error) {
+	if len(retryableStatusCodes) == 0 {
+		return nil, fmt.Errorf("no retryable status codes provided")
+	}
+
+	statusCodes := strings.Split(retryableStatusCodes, ",")
+	errorCodes := make([]codes.Code, len(statusCodes))
+	for i, code := range statusCodes {
+		err := errorCodes[i].UnmarshalJSON([]byte(code))
+		if err != nil {
+			return nil, fmt.Errorf("invalid status code %s provided", code)
+		}
+	}
+
+	return errorCodes, nil
 }
 
 type perRPCCredentials struct {
