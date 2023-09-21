@@ -112,8 +112,7 @@ go build main.go
 替换k6的仓库
 export XK6_K6_REPO=github.com/shlsky/k6
 
-xk6  build v0.45.1 --with  github.com/shlsky/xk6-grpc@v0.0.9 --with github.com/avitalique/xk6-file@latest  --with github.com/mostafa/xk6-kafka@v0.15.1 --with github.com/grafana/xk6-redis
-
+xk6  build v0.45.1 --with  github.com/shlsky/xk6-grpc@v0.0.9 --with github.com/avitalique/xk6-file@latest  --with github.com/mostafa/xk6-kafka@latest --with github.com/grafana/xk6-redis
 ## License
 
 k6 is distributed under the [AGPL-3.0 license](https://github.com/grafana/k6/blob/master/LICENSE.md).
