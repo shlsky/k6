@@ -1,4 +1,4 @@
-// Copyright 2020-2022 Buf Technologies, Inc.
+// Copyright 2020-2023 Buf Technologies, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -100,7 +100,7 @@ type EnumValueDeclNode interface {
 var _ EnumValueDeclNode = (*EnumValueNode)(nil)
 var _ EnumValueDeclNode = NoSourceNode{}
 
-// EnumNode represents an enum declaration. Example:
+// EnumValueNode represents an enum declaration. Example:
 //
 //	UNSET = 0 [deprecated = true];
 type EnumValueNode struct {
@@ -131,10 +131,10 @@ func NewEnumValueNode(name *IdentNode, equals *RuneNode, number IntValueNode, op
 	if number == nil {
 		panic("number is nil")
 	}
-	if semicolon == nil {
-		panic("semicolon is nil")
+	numChildren := 3
+	if semicolon != nil {
+		numChildren++
 	}
-	numChildren := 4
 	if opts != nil {
 		numChildren++
 	}
@@ -143,7 +143,9 @@ func NewEnumValueNode(name *IdentNode, equals *RuneNode, number IntValueNode, op
 	if opts != nil {
 		children = append(children, opts)
 	}
-	children = append(children, semicolon)
+	if semicolon != nil {
+		children = append(children, semicolon)
+	}
 	return &EnumValueNode{
 		compositeNode: compositeNode{
 			children: children,

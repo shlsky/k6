@@ -1,36 +1,205 @@
 package common
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/grafana/xk6-browser/api"
-	"github.com/grafana/xk6-browser/k6ext"
-	"github.com/grafana/xk6-browser/log"
-
-	k6modules "go.k6.io/k6/js/modules"
-
+	"github.com/chromedp/cdproto"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
 	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/dop251/goja"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/grafana/xk6-browser/k6ext"
+	"github.com/grafana/xk6-browser/log"
+
+	k6modules "go.k6.io/k6/js/modules"
 )
 
-const webVitalBinding = "k6browserSendWebVitalMetric"
+// BlankPage represents a blank page.
+const BlankPage = "about:blank"
 
-// Ensure page implements the EventEmitter, Target and Page interfaces.
-var (
-	_ EventEmitter = &Page{}
-	_ api.Page     = &Page{}
+const (
+	webVitalBinding = "k6browserSendWebVitalMetric"
+
+	eventPageConsoleAPICalled = "console"
 )
+
+// MediaType represents the type of media to emulate.
+type MediaType string
+
+const (
+	// MediaTypeScreen represents the screen media type.
+	MediaTypeScreen MediaType = "screen"
+
+	// MediaTypePrint represents the print media type.
+	MediaTypePrint MediaType = "print"
+)
+
+// ReducedMotion represents a browser reduce-motion setting.
+type ReducedMotion string
+
+// Valid reduce-motion options.
+const (
+	ReducedMotionReduce       ReducedMotion = "reduce"
+	ReducedMotionNoPreference ReducedMotion = "no-preference"
+)
+
+func (r ReducedMotion) String() string {
+	return reducedMotionToString[r]
+}
+
+var reducedMotionToString = map[ReducedMotion]string{ //nolint:gochecknoglobals
+	ReducedMotionReduce:       "reduce",
+	ReducedMotionNoPreference: "no-preference",
+}
+
+var reducedMotionToID = map[string]ReducedMotion{ //nolint:gochecknoglobals
+	"reduce":        ReducedMotionReduce,
+	"no-preference": ReducedMotionNoPreference,
+}
+
+// MarshalJSON marshals the enum as a quoted JSON string.
+func (r ReducedMotion) MarshalJSON() ([]byte, error) {
+	buffer := bytes.NewBufferString(`"`)
+	buffer.WriteString(reducedMotionToString[r])
+	buffer.WriteString(`"`)
+	return buffer.Bytes(), nil
+}
+
+// UnmarshalJSON unmarshals a quoted JSON string to the enum value.
+func (r *ReducedMotion) UnmarshalJSON(b []byte) error {
+	var j string
+	err := json.Unmarshal(b, &j)
+	if err != nil {
+		return fmt.Errorf("unmarshaling %q to ReducedMotion: %w", b, err)
+	}
+	// Note that if the string cannot be found then it will be set to the zero value.
+	*r = reducedMotionToID[j]
+	return nil
+}
+
+// Screen represents a device screen.
+type Screen struct {
+	Width  int64 `js:"width"`
+	Height int64 `js:"height"`
+}
+
+const (
+	screenWidth  = "width"
+	screenHeight = "height"
+)
+
+// Parse parses the given screen options.
+func (s *Screen) Parse(ctx context.Context, screen goja.Value) error {
+	rt := k6ext.Runtime(ctx)
+	if screen != nil && !goja.IsUndefined(screen) && !goja.IsNull(screen) {
+		screen := screen.ToObject(rt)
+		for _, k := range screen.Keys() {
+			switch k {
+			case screenWidth:
+				s.Width = screen.Get(k).ToInteger()
+			case screenHeight:
+				s.Height = screen.Get(k).ToInteger()
+			}
+		}
+	}
+
+	return nil
+}
+
+// ColorScheme represents a browser color scheme.
+type ColorScheme string
+
+// Valid color schemes.
+const (
+	ColorSchemeLight        ColorScheme = "light"
+	ColorSchemeDark         ColorScheme = "dark"
+	ColorSchemeNoPreference ColorScheme = "no-preference"
+)
+
+func (c ColorScheme) String() string {
+	return colorSchemeToString[c]
+}
+
+var colorSchemeToString = map[ColorScheme]string{ //nolint:gochecknoglobals
+	ColorSchemeLight:        "light",
+	ColorSchemeDark:         "dark",
+	ColorSchemeNoPreference: "no-preference",
+}
+
+var colorSchemeToID = map[string]ColorScheme{ //nolint:gochecknoglobals
+	"light":         ColorSchemeLight,
+	"dark":          ColorSchemeDark,
+	"no-preference": ColorSchemeNoPreference,
+}
+
+// MarshalJSON marshals the enum as a quoted JSON string.
+func (c ColorScheme) MarshalJSON() ([]byte, error) {
+	buffer := bytes.NewBufferString(`"`)
+	buffer.WriteString(colorSchemeToString[c])
+	buffer.WriteString(`"`)
+	return buffer.Bytes(), nil
+}
+
+// UnmarshalJSON unmarshals a quoted JSON string to the enum value.
+func (c *ColorScheme) UnmarshalJSON(b []byte) error {
+	var j string
+	err := json.Unmarshal(b, &j)
+	if err != nil {
+		return fmt.Errorf("unmarshaling %q to ColorScheme: %w", b, err)
+	}
+	// Note that if the string cannot be found then it will be set to the zero value.
+	*c = colorSchemeToID[j]
+	return nil
+}
+
+// EmulatedSize represents the emulated viewport and screen sizes.
+type EmulatedSize struct {
+	Viewport *Viewport
+	Screen   *Screen
+}
+
+// NewEmulatedSize creates and returns a new EmulatedSize.
+func NewEmulatedSize(viewport *Viewport, screen *Screen) *EmulatedSize {
+	return &EmulatedSize{
+		Viewport: viewport,
+		Screen:   screen,
+	}
+}
+
+type consoleEventHandlerFunc func(*ConsoleMessage)
+
+// ConsoleMessage represents a page console message.
+type ConsoleMessage struct {
+	// Args represent the list of arguments passed to a console function call.
+	Args []JSHandleAPI
+
+	// Page is the page that produced the console message, if any.
+	Page *Page
+
+	// Text represents the text of the console message.
+	Text string
+
+	// Type is the type of the console message.
+	// It can be one of 'log', 'debug', 'info', 'error', 'warning', 'dir', 'dirxml',
+	// 'table', 'trace', 'clear', 'startGroup', 'startGroupCollapsed', 'endGroup',
+	// 'assert', 'profile', 'profileEnd', 'count', 'timeEnd'.
+	Type string
+}
 
 // Page stores Page/tab related context.
 type Page struct {
@@ -69,12 +238,16 @@ type Page struct {
 
 	backgroundPage bool
 
+	eventCh         chan Event
+	eventHandlers   map[string][]consoleEventHandlerFunc
+	eventHandlersMu sync.RWMutex
+
 	mainFrameSession *FrameSession
-	// TODO: FrameSession changes by attachFrameSession (mutex?)
-	frameSessions map[cdp.FrameID]*FrameSession
-	workers       map[target.SessionID]*Worker
-	routes        []api.Route
-	vu            k6modules.VU
+	frameSessions    map[cdp.FrameID]*FrameSession
+	frameSessionsMu  sync.RWMutex
+	workers          map[target.SessionID]*Worker
+	routes           []any // TODO: Implement
+	vu               k6modules.VU
 
 	logger *log.Logger
 }
@@ -104,9 +277,10 @@ func NewPage(
 		timeoutSettings:  NewTimeoutSettings(bctx.timeoutSettings),
 		Keyboard:         NewKeyboard(ctx, s),
 		jsEnabled:        true,
+		eventCh:          make(chan Event),
+		eventHandlers:    make(map[string][]consoleEventHandlerFunc),
 		frameSessions:    make(map[cdp.FrameID]*FrameSession),
 		workers:          make(map[target.SessionID]*Worker),
-		routes:           make([]api.Route, 0),
 		vu:               k6ext.GetVU(ctx),
 		logger:           logger,
 	}
@@ -121,7 +295,7 @@ func NewPage(
 	}
 
 	var err error
-	p.frameManager = NewFrameManager(ctx, s, &p, bctx.timeoutSettings, p.logger)
+	p.frameManager = NewFrameManager(ctx, s, &p, p.timeoutSettings, p.logger)
 	p.mainFrameSession, err = NewFrameSession(ctx, s, &p, nil, tid, p.logger)
 	if err != nil {
 		p.logger.Debugf("Page:NewPage:NewFrameSession:return", "sid:%v tid:%v err:%v",
@@ -129,9 +303,13 @@ func NewPage(
 
 		return nil, err
 	}
+	p.frameSessionsMu.Lock()
 	p.frameSessions[cdp.FrameID(tid)] = p.mainFrameSession
+	p.frameSessionsMu.Unlock()
 	p.Mouse = NewMouse(ctx, s, p.frameManager.MainFrame(), bctx.timeoutSettings, p.Keyboard)
 	p.Touchscreen = NewTouchscreen(ctx, s, p.Keyboard)
+
+	p.initEvents()
 
 	action := target.SetAutoAttach(true, true).WithFlatten(true)
 	if err := action.Do(cdp.WithExecutor(p.ctx, p.session)); err != nil {
@@ -150,6 +328,42 @@ func NewPage(
 	return &p, nil
 }
 
+func (p *Page) initEvents() {
+	p.logger.Debugf("Page:initEvents",
+		"sid:%v tid:%v", p.session.ID(), p.targetID)
+
+	events := []string{
+		cdproto.EventRuntimeConsoleAPICalled,
+	}
+	p.session.on(p.ctx, events, p.eventCh)
+
+	go func() {
+		p.logger.Debugf("Page:initEvents:go",
+			"sid:%v tid:%v", p.session.ID(), p.targetID)
+		defer func() {
+			p.logger.Debugf("Page:initEvents:go:return",
+				"sid:%v tid:%v", p.session.ID(), p.targetID)
+		}()
+
+		for {
+			select {
+			case <-p.session.Done():
+				p.logger.Debugf("Page:initEvents:go:session.done",
+					"sid:%v tid:%v", p.session.ID(), p.targetID)
+				return
+			case <-p.ctx.Done():
+				p.logger.Debugf("Page:initEvents:go:ctx.Done",
+					"sid:%v tid:%v", p.session.ID(), p.targetID)
+				return
+			case event := <-p.eventCh:
+				if ev, ok := event.data.(*cdpruntime.EventConsoleAPICalled); ok {
+					p.onConsoleAPICalled(ev)
+				}
+			}
+		}
+	}()
+}
+
 func (p *Page) closeWorker(sessionID target.SessionID) {
 	p.logger.Debugf("Page:closeWorker", "sid:%v", sessionID)
 
@@ -160,7 +374,7 @@ func (p *Page) closeWorker(sessionID target.SessionID) {
 }
 
 func (p *Page) defaultTimeout() time.Duration {
-	return time.Duration(p.timeoutSettings.timeout()) * time.Second
+	return p.timeoutSettings.timeout()
 }
 
 func (p *Page) didClose() {
@@ -206,7 +420,11 @@ func (p *Page) getFrameElement(f *Frame) (handle *ElementHandle, _ error) {
 		return nil, errors.New("frame has been detached 1")
 	}
 
-	parentSession := p.getFrameSession(cdp.FrameID(parent.ID()))
+	rootFrame := f
+	for ; rootFrame.parentFrame != nil; rootFrame = rootFrame.parentFrame {
+	}
+
+	parentSession := p.getFrameSession(cdp.FrameID(rootFrame.ID()))
 	action := dom.GetFrameOwner(cdp.FrameID(f.ID()))
 	backendNodeId, _, err := action.Do(cdp.WithExecutor(p.ctx, parentSession.session))
 	if err != nil {
@@ -275,12 +493,15 @@ func (p *Page) getOwnerFrame(apiCtx context.Context, h *ElementHandle) cdp.Frame
 
 func (p *Page) attachFrameSession(fid cdp.FrameID, fs *FrameSession) {
 	p.logger.Debugf("Page:attachFrameSession", "sid:%v fid=%v", p.session.ID(), fid)
+	p.frameSessionsMu.Lock()
+	defer p.frameSessionsMu.Unlock()
 	fs.page.frameSessions[fid] = fs
 }
 
 func (p *Page) getFrameSession(frameID cdp.FrameID) *FrameSession {
 	p.logger.Debugf("Page:getFrameSession", "sid:%v fid:%v", p.sessionID(), frameID)
-
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
 	return p.frameSessions[frameID]
 }
 
@@ -320,6 +541,9 @@ func (p *Page) setViewportSize(viewportSize *Size) error {
 func (p *Page) updateExtraHTTPHeaders() {
 	p.logger.Debugf("Page:updateExtraHTTPHeaders", "sid:%v", p.sessionID())
 
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
+
 	for _, fs := range p.frameSessions {
 		fs.updateExtraHTTPHeaders(false)
 	}
@@ -327,6 +551,9 @@ func (p *Page) updateExtraHTTPHeaders() {
 
 func (p *Page) updateGeolocation() error {
 	p.logger.Debugf("Page:updateGeolocation", "sid:%v", p.sessionID())
+
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
 
 	for _, fs := range p.frameSessions {
 		p.logger.Debugf("Page:updateGeolocation:frameSession",
@@ -341,11 +568,15 @@ func (p *Page) updateGeolocation() error {
 			return err
 		}
 	}
+
 	return nil
 }
 
 func (p *Page) updateOffline() {
 	p.logger.Debugf("Page:updateOffline", "sid:%v", p.sessionID())
+
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
 
 	for _, fs := range p.frameSessions {
 		fs.updateOffline(false)
@@ -354,6 +585,9 @@ func (p *Page) updateOffline() {
 
 func (p *Page) updateHttpCredentials() {
 	p.logger.Debugf("Page:updateHttpCredentials", "sid:%v", p.sessionID())
+
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
 
 	for _, fs := range p.frameSessions {
 		fs.updateHTTPCredentials(false)
@@ -415,18 +649,20 @@ func (p *Page) IsChecked(selector string, opts goja.Value) bool {
 }
 
 // Click clicks an element matching provided selector.
-func (p *Page) Click(selector string, opts goja.Value) error {
+func (p *Page) Click(selector string, opts *FrameClickOptions) error {
 	p.logger.Debugf("Page:Click", "sid:%v selector:%s", p.sessionID(), selector)
 
-	return p.MainFrame().Click(selector, opts) //nolint:wrapcheck
+	return p.MainFrame().Click(selector, opts)
 }
 
 // Close closes the page.
-func (p *Page) Close(opts goja.Value) error {
+func (p *Page) Close(_ goja.Value) error {
 	p.logger.Debugf("Page:Close", "sid:%v", p.sessionID())
+	_, span := TraceAPICall(p.ctx, p.targetID.String(), "page.close")
+	defer span.End()
 
 	// forcing the pagehide event to trigger web vitals metrics.
-	v := p.vu.Runtime().ToValue(`() => window.dispatchEvent(new Event('pagehide'))`)
+	v := `() => window.dispatchEvent(new Event('pagehide'))`
 	ctx, cancel := context.WithTimeout(p.ctx, p.defaultTimeout())
 	defer cancel()
 	_, err := p.MainFrame().EvaluateWithContext(ctx, v)
@@ -469,7 +705,7 @@ func (p *Page) Content() string {
 }
 
 // Context closes the page.
-func (p *Page) Context() api.BrowserContext {
+func (p *Page) Context() *BrowserContext {
 	return p.browserCtx
 }
 
@@ -480,10 +716,11 @@ func (p *Page) Dblclick(selector string, opts goja.Value) {
 	p.MainFrame().Dblclick(selector, opts)
 }
 
-func (p *Page) DispatchEvent(selector string, typ string, eventInit goja.Value, opts goja.Value) {
+// DispatchEvent dispatches an event on the page to the element that matches the provided selector.
+func (p *Page) DispatchEvent(selector string, typ string, eventInit any, opts *FrameDispatchEventOptions) error {
 	p.logger.Debugf("Page:DispatchEvent", "sid:%v selector:%s", p.sessionID(), selector)
 
-	p.MainFrame().DispatchEvent(selector, typ, eventInit, opts)
+	return p.MainFrame().DispatchEvent(selector, typ, eventInit, opts)
 }
 
 // DragAndDrop is not implemented.
@@ -503,11 +740,14 @@ func (p *Page) EmulateMedia(opts goja.Value) {
 	p.colorScheme = parsedOpts.ColorScheme
 	p.reducedMotion = parsedOpts.ReducedMotion
 
+	p.frameSessionsMu.RLock()
 	for _, fs := range p.frameSessions {
 		if err := fs.updateEmulateMedia(false); err != nil {
+			p.frameSessionsMu.RUnlock()
 			k6ext.Panic(p.ctx, "emulating media: %w", err)
 		}
 	}
+	p.frameSessionsMu.RUnlock()
 
 	applySlowMo(p.ctx)
 }
@@ -538,14 +778,14 @@ func (p *Page) EmulateVisionDeficiency(typ string) {
 }
 
 // Evaluate runs JS code within the execution context of the main frame of the page.
-func (p *Page) Evaluate(pageFunc goja.Value, args ...goja.Value) any {
+func (p *Page) Evaluate(pageFunc string, args ...any) any {
 	p.logger.Debugf("Page:Evaluate", "sid:%v", p.sessionID())
 
 	return p.MainFrame().Evaluate(pageFunc, args...)
 }
 
 // EvaluateHandle runs JS code within the execution context of the main frame of the page.
-func (p *Page) EvaluateHandle(pageFunc goja.Value, args ...goja.Value) (api.JSHandle, error) {
+func (p *Page) EvaluateHandle(pageFunc string, args ...any) (JSHandleAPI, error) {
 	p.logger.Debugf("Page:EvaluateHandle", "sid:%v", p.sessionID())
 
 	h, err := p.MainFrame().EvaluateHandle(pageFunc, args...)
@@ -578,17 +818,18 @@ func (p *Page) Focus(selector string, opts goja.Value) {
 }
 
 // Frame is not implemented.
-func (p *Page) Frame(frameSelector goja.Value) api.Frame {
+func (p *Page) Frame(_ goja.Value) *Frame {
 	k6ext.Panic(p.ctx, "Page.frame(frameSelector) has not been implemented yet")
 	return nil
 }
 
 // Frames returns a list of frames on the page.
-func (p *Page) Frames() []api.Frame {
+func (p *Page) Frames() []*Frame {
 	return p.frameManager.Frames()
 }
 
-func (p *Page) GetAttribute(selector string, name string, opts goja.Value) goja.Value {
+// GetAttribute returns the attribute value of the element matching the provided selector.
+func (p *Page) GetAttribute(selector string, name string, opts goja.Value) any {
 	p.logger.Debugf("Page:GetAttribute", "sid:%v selector:%s name:%s",
 		p.sessionID(), selector, name)
 
@@ -596,35 +837,42 @@ func (p *Page) GetAttribute(selector string, name string, opts goja.Value) goja.
 }
 
 // GetKeyboard returns the keyboard for the page.
-func (p *Page) GetKeyboard() api.Keyboard {
+func (p *Page) GetKeyboard() *Keyboard {
 	return p.Keyboard
 }
 
 // GetMouse returns the mouse for the page.
-func (p *Page) GetMouse() api.Mouse {
+func (p *Page) GetMouse() *Mouse {
 	return p.Mouse
 }
 
 // GetTouchscreen returns the touchscreen for the page.
-func (p *Page) GetTouchscreen() api.Touchscreen {
+func (p *Page) GetTouchscreen() *Touchscreen {
 	return p.Touchscreen
 }
 
 // GoBack is not implemented.
-func (p *Page) GoBack(opts goja.Value) api.Response {
+func (p *Page) GoBack(_ goja.Value) *Response {
 	k6ext.Panic(p.ctx, "Page.goBack(opts) has not been implemented yet")
 	return nil
 }
 
 // GoForward is not implemented.
-func (p *Page) GoForward(opts goja.Value) api.Response {
+func (p *Page) GoForward(_ goja.Value) *Response {
 	k6ext.Panic(p.ctx, "Page.goForward(opts) has not been implemented yet")
 	return nil
 }
 
 // Goto will navigate the page to the specified URL and return a HTTP response object.
-func (p *Page) Goto(url string, opts goja.Value) (api.Response, error) {
+func (p *Page) Goto(url string, opts *FrameGotoOptions) (*Response, error) {
 	p.logger.Debugf("Page:Goto", "sid:%v url:%q", p.sessionID(), url)
+	_, span := TraceAPICall(
+		p.ctx,
+		p.targetID.String(),
+		"page.goto",
+		trace.WithAttributes(attribute.String("page.goto.url", url)),
+	)
+	defer span.End()
 
 	return p.MainFrame().Goto(url, opts)
 }
@@ -678,27 +926,32 @@ func (p *Page) IsEnabled(selector string, opts goja.Value) bool {
 	return p.MainFrame().IsEnabled(selector, opts)
 }
 
-func (p *Page) IsHidden(selector string, opts goja.Value) bool {
+// IsHidden will look for an element in the dom with given selector and see if
+// the element is hidden. It will not wait for a match to occur. If no elements
+// match `false` will be returned.
+func (p *Page) IsHidden(selector string, opts goja.Value) (bool, error) {
 	p.logger.Debugf("Page:IsHidden", "sid:%v selector:%s", p.sessionID(), selector)
 
 	return p.MainFrame().IsHidden(selector, opts)
 }
 
-func (p *Page) IsVisible(selector string, opts goja.Value) bool {
+// IsVisible will look for an element in the dom with given selector. It will
+// not wait for a match to occur. If no elements match `false` will be returned.
+func (p *Page) IsVisible(selector string, opts goja.Value) (bool, error) {
 	p.logger.Debugf("Page:IsVisible", "sid:%v selector:%s", p.sessionID(), selector)
 
 	return p.MainFrame().IsVisible(selector, opts)
 }
 
 // Locator creates and returns a new locator for this page (main frame).
-func (p *Page) Locator(selector string, opts goja.Value) api.Locator {
+func (p *Page) Locator(selector string, opts goja.Value) *Locator {
 	p.logger.Debugf("Page:Locator", "sid:%s sel: %q opts:%+v", p.sessionID(), selector, opts)
 
 	return p.MainFrame().Locator(selector, opts)
 }
 
 // MainFrame returns the main frame on the page.
-func (p *Page) MainFrame() api.Frame {
+func (p *Page) MainFrame() *Frame {
 	mf := p.frameManager.MainFrame()
 
 	if mf == nil {
@@ -712,8 +965,40 @@ func (p *Page) MainFrame() api.Frame {
 	return mf
 }
 
+// Referrer returns the page's referrer.
+// It's an internal method not to be exposed as a JS API.
+func (p *Page) Referrer() string {
+	nm := p.mainFrameSession.getNetworkManager()
+	return nm.extraHTTPHeaders["referer"]
+}
+
+// NavigationTimeout returns the page's navigation timeout.
+// It's an internal method not to be exposed as a JS API.
+func (p *Page) NavigationTimeout() time.Duration {
+	return p.frameManager.timeoutSettings.navigationTimeout()
+}
+
+// On subscribes to a page event for which the given handler will be executed
+// passing in the ConsoleMessage associated with the event.
+// The only accepted event value is 'console'.
+func (p *Page) On(event string, handler func(*ConsoleMessage)) error {
+	if event != eventPageConsoleAPICalled {
+		return fmt.Errorf("unknown page event: %q, must be %q", event, eventPageConsoleAPICalled)
+	}
+
+	p.eventHandlersMu.Lock()
+	defer p.eventHandlersMu.Unlock()
+
+	if _, ok := p.eventHandlers[eventPageConsoleAPICalled]; !ok {
+		p.eventHandlers[eventPageConsoleAPICalled] = make([]consoleEventHandlerFunc, 0, 1)
+	}
+	p.eventHandlers[eventPageConsoleAPICalled] = append(p.eventHandlers[eventPageConsoleAPICalled], handler)
+
+	return nil
+}
+
 // Opener returns the opener of the target.
-func (p *Page) Opener() api.Page {
+func (p *Page) Opener() *Page {
 	return p.opener
 }
 
@@ -735,24 +1020,29 @@ func (p *Page) Press(selector string, key string, opts goja.Value) {
 }
 
 // Query returns the first element matching the specified selector.
-func (p *Page) Query(selector string) (api.ElementHandle, error) {
+func (p *Page) Query(selector string) (*ElementHandle, error) {
 	p.logger.Debugf("Page:Query", "sid:%v selector:%s", p.sessionID(), selector)
 
-	return p.frameManager.MainFrame().Query(selector)
+	return p.frameManager.MainFrame().Query(selector, StrictModeOff)
 }
 
 // QueryAll returns all elements matching the specified selector.
-func (p *Page) QueryAll(selector string) ([]api.ElementHandle, error) {
+func (p *Page) QueryAll(selector string) ([]*ElementHandle, error) {
 	p.logger.Debugf("Page:QueryAll", "sid:%v selector:%s", p.sessionID(), selector)
 
 	return p.frameManager.MainFrame().QueryAll(selector)
 }
 
 // Reload will reload the current page.
-func (p *Page) Reload(opts goja.Value) api.Response {
+func (p *Page) Reload(opts goja.Value) *Response { //nolint:funlen,cyclop
 	p.logger.Debugf("Page:Reload", "sid:%v", p.sessionID())
+	_, span := TraceAPICall(p.ctx, p.targetID.String(), "page.reload")
+	defer span.End()
 
-	parsedOpts := NewPageReloadOptions(LifecycleEventLoad, p.defaultTimeout())
+	parsedOpts := NewPageReloadOptions(
+		LifecycleEventLoad,
+		p.timeoutSettings.navigationTimeout(),
+	)
 	if err := parsedOpts.Parse(p.ctx, opts); err != nil {
 		k6ext.Panic(p.ctx, "parsing reload options: %w", err)
 	}
@@ -830,18 +1120,19 @@ func (p *Page) Route(url goja.Value, handler goja.Callable) {
 }
 
 // Screenshot will instruct Chrome to save a screenshot of the current page and save it to specified file.
-func (p *Page) Screenshot(opts goja.Value) goja.ArrayBuffer {
-	parsedOpts := NewPageScreenshotOptions()
-	if err := parsedOpts.Parse(p.ctx, opts); err != nil {
-		k6ext.Panic(p.ctx, "parsing screenshot options: %w", err)
-	}
-	s := newScreenshotter(p.ctx)
-	buf, err := s.screenshotPage(p, parsedOpts)
+func (p *Page) Screenshot(opts *PageScreenshotOptions, sp ScreenshotPersister) ([]byte, error) {
+	spanCtx, span := TraceAPICall(p.ctx, p.targetID.String(), "page.screenshot")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("screenshot.path", opts.Path))
+
+	s := newScreenshotter(spanCtx, sp)
+	buf, err := s.screenshotPage(p, opts)
 	if err != nil {
-		k6ext.Panic(p.ctx, "capturing screenshot: %w", err)
+		return nil, fmt.Errorf("taking screenshot of page: %w", err)
 	}
-	rt := p.vu.Runtime()
-	return rt.NewArrayBuffer(*buf)
+
+	return buf, err
 }
 
 func (p *Page) SelectOption(selector string, values goja.Value, opts goja.Value) []string {
@@ -860,14 +1151,14 @@ func (p *Page) SetContent(html string, opts goja.Value) {
 func (p *Page) SetDefaultNavigationTimeout(timeout int64) {
 	p.logger.Debugf("Page:SetDefaultNavigationTimeout", "sid:%v timeout:%d", p.sessionID(), timeout)
 
-	p.timeoutSettings.setDefaultNavigationTimeout(timeout)
+	p.timeoutSettings.setDefaultNavigationTimeout(time.Duration(timeout) * time.Millisecond)
 }
 
 // SetDefaultTimeout sets the default maximum timeout in milliseconds.
 func (p *Page) SetDefaultTimeout(timeout int64) {
 	p.logger.Debugf("Page:SetDefaultTimeout", "sid:%v timeout:%d", p.sessionID(), timeout)
 
-	p.timeoutSettings.setDefaultTimeout(timeout)
+	p.timeoutSettings.setDefaultTimeout(time.Duration(timeout) * time.Millisecond)
 }
 
 // SetExtraHTTPHeaders sets default HTTP headers for page and whole frame hierarchy.
@@ -878,10 +1169,11 @@ func (p *Page) SetExtraHTTPHeaders(headers map[string]string) {
 	p.updateExtraHTTPHeaders()
 }
 
-// SetInputFiles is not implemented.
-func (p *Page) SetInputFiles(selector string, files goja.Value, opts goja.Value) {
-	k6ext.Panic(p.ctx, "Page.textContent(selector, opts) has not been implemented yet")
-	// TODO: needs slowMo
+// SetInputFiles sets input files for the selected element.
+func (p *Page) SetInputFiles(selector string, files goja.Value, opts goja.Value) error {
+	p.logger.Debugf("Page:SetInputFiles", "sid:%v selector:%s", p.sessionID(), selector)
+
+	return p.MainFrame().SetInputFiles(selector, files, opts)
 }
 
 // SetViewportSize will update the viewport width and height.
@@ -910,11 +1202,53 @@ func (p *Page) TextContent(selector string, opts goja.Value) string {
 	return p.MainFrame().TextContent(selector, opts)
 }
 
+// Timeout will return the default timeout or the one set by the user.
+// It's an internal method not to be exposed as a JS API.
+func (p *Page) Timeout() time.Duration {
+	return p.defaultTimeout()
+}
+
 func (p *Page) Title() string {
 	p.logger.Debugf("Page:Title", "sid:%v", p.sessionID())
 
-	v := p.vu.Runtime().ToValue(`() => document.title`)
-	return gojaValueToString(p.ctx, p.Evaluate(v))
+	// TODO: return error
+
+	v := `() => document.title`
+	return p.Evaluate(v).(string) //nolint:forcetypeassert
+}
+
+// ThrottleCPU will slow the CPU down from chrome's perspective to simulate
+// a test being run on a slower device.
+func (p *Page) ThrottleCPU(cpuProfile CPUProfile) error {
+	p.logger.Debugf("Page:ThrottleCPU", "sid:%v", p.sessionID())
+
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
+
+	for _, fs := range p.frameSessions {
+		if err := fs.throttleCPU(cpuProfile); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ThrottleNetwork will slow the network down to simulate a slow network e.g.
+// simulating a slow 3G connection.
+func (p *Page) ThrottleNetwork(networkProfile NetworkProfile) error {
+	p.logger.Debugf("Page:ThrottleNetwork", "sid:%v", p.sessionID())
+
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
+
+	for _, fs := range p.frameSessions {
+		if err := fs.throttleNetwork(networkProfile); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (p *Page) Type(selector string, text string, opts goja.Value) {
@@ -932,12 +1266,14 @@ func (p *Page) Unroute(url goja.Value, handler goja.Callable) {
 func (p *Page) URL() string {
 	p.logger.Debugf("Page:URL", "sid:%v", p.sessionID())
 
-	v := p.vu.Runtime().ToValue(`() => document.location.toString()`)
-	return gojaValueToString(p.ctx, p.Evaluate(v))
+	// TODO: return error
+
+	v := `() => document.location.toString()`
+	return p.Evaluate(v).(string) //nolint:forcetypeassert
 }
 
 // Video returns information of recorded video.
-func (p *Page) Video() api.Video {
+func (p *Page) Video() any { // TODO: implement
 	k6ext.Panic(p.ctx, "Page.video() has not been implemented yet")
 	return nil
 }
@@ -960,10 +1296,9 @@ func (p *Page) WaitForEvent(event string, optsOrPredicate goja.Value) any {
 }
 
 // WaitForFunction waits for the given predicate to return a truthy value.
-func (p *Page) WaitForFunction(fn, opts goja.Value, args ...goja.Value) (any, error) {
+func (p *Page) WaitForFunction(js string, opts *FrameWaitForFunctionOptions, jsArgs ...any) (any, error) {
 	p.logger.Debugf("Page:WaitForFunction", "sid:%v", p.sessionID())
-
-	return p.frameManager.MainFrame().WaitForFunction(fn, opts, args...)
+	return p.frameManager.MainFrame().WaitForFunction(js, opts, jsArgs...)
 }
 
 // WaitForLoadState waits for the specified page life cycle event.
@@ -974,26 +1309,28 @@ func (p *Page) WaitForLoadState(state string, opts goja.Value) {
 }
 
 // WaitForNavigation waits for the given navigation lifecycle event to happen.
-func (p *Page) WaitForNavigation(opts goja.Value) (api.Response, error) {
+func (p *Page) WaitForNavigation(opts *FrameWaitForNavigationOptions) (*Response, error) {
 	p.logger.Debugf("Page:WaitForNavigation", "sid:%v", p.sessionID())
+	_, span := TraceAPICall(p.ctx, p.targetID.String(), "page.waitForNavigation")
+	defer span.End()
 
 	return p.frameManager.MainFrame().WaitForNavigation(opts)
 }
 
 // WaitForRequest is not implemented.
-func (p *Page) WaitForRequest(urlOrPredicate, opts goja.Value) api.Request {
+func (p *Page) WaitForRequest(_, _ goja.Value) *Request {
 	k6ext.Panic(p.ctx, "Page.waitForRequest(urlOrPredicate, opts) has not been implemented yet")
 	return nil
 }
 
 // WaitForResponse is not implemented.
-func (p *Page) WaitForResponse(urlOrPredicate, opts goja.Value) api.Response {
+func (p *Page) WaitForResponse(_, _ goja.Value) *Response {
 	k6ext.Panic(p.ctx, "Page.waitForResponse(urlOrPredicate, opts) has not been implemented yet")
 	return nil
 }
 
 // WaitForSelector waits for the given selector to match the waiting criteria.
-func (p *Page) WaitForSelector(selector string, opts goja.Value) (api.ElementHandle, error) {
+func (p *Page) WaitForSelector(selector string, opts goja.Value) (*ElementHandle, error) {
 	p.logger.Debugf("Page:WaitForSelector",
 		"sid:%v stid:%v ptid:%v selector:%s",
 		p.sessionID(), p.session.TargetID(), p.targetID, selector)
@@ -1009,12 +1346,88 @@ func (p *Page) WaitForTimeout(timeout int64) {
 }
 
 // Workers returns all WebWorkers of page.
-func (p *Page) Workers() []api.Worker {
-	workers := make([]api.Worker, 0, len(p.workers))
+func (p *Page) Workers() []*Worker {
+	workers := make([]*Worker, 0, len(p.workers))
 	for _, w := range p.workers {
 		workers = append(workers, w)
 	}
 	return workers
+}
+
+// TargetID retrieve the unique id that is associated to this page.
+// For internal use only.
+func (p *Page) TargetID() string {
+	return p.targetID.String()
+}
+
+func (p *Page) onConsoleAPICalled(event *cdpruntime.EventConsoleAPICalled) {
+	// If there are no handlers for EventConsoleAPICalled, return
+	p.eventHandlersMu.RLock()
+	if _, ok := p.eventHandlers[eventPageConsoleAPICalled]; !ok {
+		p.eventHandlersMu.RUnlock()
+		return
+	}
+	p.eventHandlersMu.RUnlock()
+
+	m, err := p.consoleMsgFromConsoleEvent(event)
+	if err != nil {
+		p.logger.Errorf("Page:onConsoleAPICalled", "building console message: %v", err)
+		return
+	}
+
+	p.eventHandlersMu.RLock()
+	defer p.eventHandlersMu.RUnlock()
+	for _, h := range p.eventHandlers[eventPageConsoleAPICalled] {
+		h := h
+		h(m)
+	}
+}
+
+func (p *Page) consoleMsgFromConsoleEvent(e *cdpruntime.EventConsoleAPICalled) (*ConsoleMessage, error) {
+	execCtx, err := p.executionContextForID(e.ExecutionContextID)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		objects       = make([]string, 0, len(e.Args))
+		objectHandles = make([]JSHandleAPI, 0, len(e.Args))
+	)
+
+	for _, robj := range e.Args {
+		s, err := parseConsoleRemoteObject(p.logger, robj)
+		if err != nil {
+			p.logger.Errorf("consoleMsgFromConsoleEvent", "failed to parse console message %v", err)
+		}
+
+		objects = append(objects, s)
+		objectHandles = append(objectHandles, NewJSHandle(
+			p.ctx, p.session, execCtx, execCtx.Frame(), robj, p.logger,
+		))
+	}
+
+	return &ConsoleMessage{
+		Args: objectHandles,
+		Page: p,
+		Text: textForConsoleEvent(e, objects),
+		Type: e.Type.String(),
+	}, nil
+}
+
+// executionContextForID returns the page ExecutionContext for the given ID.
+func (p *Page) executionContextForID(
+	executionContextID cdpruntime.ExecutionContextID,
+) (*ExecutionContext, error) {
+	p.frameSessionsMu.RLock()
+	defer p.frameSessionsMu.RUnlock()
+
+	for _, fs := range p.frameSessions {
+		if exc, err := fs.executionContextForID(executionContextID); err == nil {
+			return exc, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no execution context found for id: %v", executionContextID)
 }
 
 // sessionID returns the Page's session ID.
@@ -1024,4 +1437,19 @@ func (p *Page) sessionID() (sid target.SessionID) {
 		sid = p.session.ID()
 	}
 	return sid
+}
+
+// textForConsoleEvent generates the text representation for a consoleAPICalled event
+// mimicking Playwright's behavior.
+func textForConsoleEvent(e *cdpruntime.EventConsoleAPICalled, args []string) string {
+	if e.Type.String() == "dir" || e.Type.String() == "dirxml" ||
+		e.Type.String() == "table" {
+		if len(e.Args) > 0 {
+			// These commands accept a single arg
+			return e.Args[0].Description
+		}
+		return ""
+	}
+
+	return strings.Join(args, " ")
 }

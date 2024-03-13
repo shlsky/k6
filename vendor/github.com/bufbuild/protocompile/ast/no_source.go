@@ -1,4 +1,4 @@
-// Copyright 2020-2022 Buf Technologies, Inc.
+// Copyright 2020-2023 Buf Technologies, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,24 @@ package ast
 // name is known.
 func UnknownPos(filename string) SourcePos {
 	return SourcePos{Filename: filename}
+}
+
+// UnknownSpan is a placeholder span when only the source file
+// name is known.
+func UnknownSpan(filename string) SourceSpan {
+	return unknownSpan{filename: filename}
+}
+
+type unknownSpan struct {
+	filename string
+}
+
+func (s unknownSpan) Start() SourcePos {
+	return UnknownPos(s.filename)
+}
+
+func (s unknownSpan) End() SourcePos {
+	return UnknownPos(s.filename)
 }
 
 // NoSourceNode is a placeholder AST node that implements numerous

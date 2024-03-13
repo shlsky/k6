@@ -1,116 +1,43 @@
-package grpc
+package grpc_test
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
-	"io"
-	"net/url"
-	"os"
-	"runtime"
 	"strings"
 	"testing"
 
-	"google.golang.org/grpc/reflection"
-	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
-
-	"github.com/dop251/goja"
-	"github.com/golang/protobuf/ptypes/any"
-	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	grpcstats "google.golang.org/grpc/stats"
-	"google.golang.org/grpc/status"
-	"gopkg.in/guregu/null.v3"
-
-	"go.k6.io/k6/js/modulestest"
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/fsext"
+	k6grpc "go.k6.io/k6/js/modules/k6/grpc"
 	"go.k6.io/k6/lib/netext/grpcext"
-	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	grpcanytesting "go.k6.io/k6/lib/testutils/httpmultibin/grpc_any_testing"
 	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_testing"
+	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_wrappers_testing"
 	"go.k6.io/k6/metrics"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/golang/protobuf/ptypes/any"
+	_struct "github.com/golang/protobuf/ptypes/struct"
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/metadata"
+	v1alphagrpc "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	grpcstats "google.golang.org/grpc/stats"
+	"gopkg.in/guregu/null.v3"
 )
-
-const isWindows = runtime.GOOS == "windows"
-
-// codeBlock represents an execution of a k6 script.
-type codeBlock struct {
-	code       string
-	val        interface{}
-	err        string
-	windowsErr string
-	asserts    func(*testing.T, *httpmultibin.HTTPMultiBin, chan metrics.SampleContainer, error)
-}
-
-type testcase struct {
-	name       string
-	setup      func(*httpmultibin.HTTPMultiBin)
-	initString codeBlock // runs in the init context
-	vuString   codeBlock // runs in the vu context
-}
 
 func TestClient(t *testing.T) {
 	t.Parallel()
-
-	type testState struct {
-		*modulestest.Runtime
-		httpBin *httpmultibin.HTTPMultiBin
-		samples chan metrics.SampleContainer
-	}
-	setup := func(t *testing.T) testState {
-		t.Helper()
-
-		tb := httpmultibin.NewHTTPMultiBin(t)
-		samples := make(chan metrics.SampleContainer, 1000)
-		testRuntime := modulestest.NewRuntime(t)
-
-		cwd, err := os.Getwd() //nolint:golint,forbidigo
-		require.NoError(t, err)
-		fs := fsext.NewOsFs()
-		if isWindows {
-			fs = fsext.NewTrimFilePathSeparatorFs(fs)
-		}
-		testRuntime.VU.InitEnvField.CWD = &url.URL{Path: cwd}
-		testRuntime.VU.InitEnvField.FileSystems = map[string]fsext.Fs{"file": fs}
-
-		return testState{
-			Runtime: testRuntime,
-			httpBin: tb,
-			samples: samples,
-		}
-	}
-
-	assertMetricEmitted := func(
-		t *testing.T,
-		metricName string,
-		sampleContainers []metrics.SampleContainer,
-		url string,
-	) {
-		seenMetric := false
-
-		for _, sampleContainer := range sampleContainers {
-			for _, sample := range sampleContainer.GetSamples() {
-				surl, ok := sample.Tags.Get("url")
-				assert.True(t, ok)
-				if surl == url {
-					if sample.Metric.Name == metricName {
-						seenMetric = true
-					}
-				}
-			}
-		}
-		assert.True(t, seenMetric, "url %s didn't emit %s", url, metricName)
-	}
 
 	tests := []testcase{
 		{
@@ -156,7 +83,7 @@ func TestClient(t *testing.T) {
 				code: `
 			var client = new grpc.Client();
 			client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
-				val: []MethodInfo{{MethodInfo: grpc.MethodInfo{Name: "EmptyCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/EmptyCall"}, {MethodInfo: grpc.MethodInfo{Name: "UnaryCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/UnaryCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingOutputCall", IsClientStream: false, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingOutputCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingInputCall", IsClientStream: true, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingInputCall"}, {MethodInfo: grpc.MethodInfo{Name: "FullDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/FullDuplexCall"}, {MethodInfo: grpc.MethodInfo{Name: "HalfDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/HalfDuplexCall"}},
+				val: []k6grpc.MethodInfo{{MethodInfo: grpc.MethodInfo{Name: "EmptyCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/EmptyCall"}, {MethodInfo: grpc.MethodInfo{Name: "UnaryCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/UnaryCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingOutputCall", IsClientStream: false, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingOutputCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingInputCall", IsClientStream: true, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingInputCall"}, {MethodInfo: grpc.MethodInfo{Name: "FullDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/FullDuplexCall"}, {MethodInfo: grpc.MethodInfo{Name: "HalfDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/HalfDuplexCall"}},
 			},
 		},
 		{
@@ -183,7 +110,7 @@ func TestClient(t *testing.T) {
 				code: `
 			var client = new grpc.Client();
 			client.loadProtoset("../../../../lib/testutils/httpmultibin/grpc_protoset_testing/test.protoset");`,
-				val: []MethodInfo{
+				val: []k6grpc.MethodInfo{
 					{
 						MethodInfo: grpc.MethodInfo{Name: "Test", IsClientStream: false, IsServerStream: false},
 						Package:    "grpc.protoset.testing", Service: "TestService", FullMethod: "/grpc.protoset.testing.TestService/Test",
@@ -486,6 +413,31 @@ func TestClient(t *testing.T) {
 			`},
 		},
 		{
+			name: "RequestBinHeaders",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					md, ok := metadata.FromIncomingContext(ctx)
+					if !ok || len(md["x-load-tester-bin"]) == 0 || md["x-load-tester-bin"][0] != string([]byte{2, 200}) {
+						return nil, status.Error(codes.FailedPrecondition, "")
+					}
+
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			vuString: codeBlock{code: `
+				client.connect("GRPCBIN_ADDR");
+				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { metadata: { "X-Load-Tester-bin": new Uint8Array([2, 200]) } })
+				if (resp.status !== grpc.StatusOK) {
+					throw new Error("failed to send correct headers in the request")
+				}
+			`},
+		},
+		{
 			name: "ResponseMessage",
 			initString: codeBlock{
 				code: `
@@ -642,6 +594,18 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "ReflectV1",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.RegisterV1(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {reflect: true})`,
+			},
+		},
+		{
 			name: "ReflectBadParam",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
 				reflection.Register(tb.ServerGRPC)
@@ -676,7 +640,51 @@ func TestClient(t *testing.T) {
 		{
 			name: "ReflectInvoke",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register both reflection APIs v1 and v1alpha
 				reflection.Register(tb.ServerGRPC)
+
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Alpha_Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only v1alpha (this could be removed with removal v1alpha from grpc-go)
+				s := tb.ServerGRPC
+				svr := reflection.NewServer(reflection.ServerOptions{Services: s})
+				v1alphagrpc.RegisterServerReflectionServer(s, svr)
+
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only reflection APIs v1
+				reflection.RegisterV1(tb.ServerGRPC)
+
 				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
 					return &grpc_testing.Empty{}, nil
 				}
@@ -805,70 +813,167 @@ func TestClient(t *testing.T) {
 				err: "no gRPC connection",
 			},
 		},
+		{
+			name: "Wrappers",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestStringImplementation = func(_ context.Context, sv *wrappers.StringValue) (*wrappers.StringValue, error) {
+					return &wrapperspb.StringValue{
+						Value: "hey " + sv.Value,
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_wrappers_testing/test.proto");
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestString", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+			`,
+			},
+		},
+		{
+			name: "WrappersWithReflection",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(hb.ServerGRPC)
+
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestIntegerImplementation = func(_ context.Context, iv *wrappers.Int64Value) (*wrappers.Int64Value, error) {
+					return &wrappers.Int64Value{
+						Value: 2 * iv.Value,
+					}, nil
+				}
+
+				srv.TestStringImplementation = func(_ context.Context, sv *wrappers.StringValue) (*wrappers.StringValue, error) {
+					return &wrapperspb.StringValue{
+						Value: "hey " + sv.Value,
+					}, nil
+				}
+
+				srv.TestBooleanImplementation = func(_ context.Context, bv *wrappers.BoolValue) (*wrappers.BoolValue, error) {
+					return &wrapperspb.BoolValue{
+						Value: bv.Value != true,
+					}, nil
+				}
+
+				srv.TestDoubleImplementation = func(_ context.Context, bv *wrappers.DoubleValue) (*wrappers.DoubleValue, error) {
+					return &wrapperspb.DoubleValue{
+						Value: bv.Value * 2,
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {reflect: true});
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestString", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+
+				let respInt = client.invoke("grpc.wrappers.testing.Service/TestInteger", "3")
+				if (respInt.message !== "6") {
+					throw new Error("expected to get '6', but got a " + respInt.message)
+				}
+
+				let respDouble = client.invoke("grpc.wrappers.testing.Service/TestDouble", "2.7")
+				if (respDouble.message !== 5.4) {
+					throw new Error("expected to get '5.4', but got a " + respDouble.message)
+				}
+			`,
+			},
+		},
+		{
+			name: "ValueReflection",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(hb.ServerGRPC)
+
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestValueImplementation = func(_ context.Context, in *_struct.Value) (*_struct.Value, error) {
+					if in.GetNumberValue() == 12 {
+						return &_struct.Value{
+							Kind: &_struct.Value_NumberValue{
+								NumberValue: 42,
+							},
+						}, nil
+					}
+
+					if in.GetStringValue() != "" {
+						return &_struct.Value{
+							Kind: &_struct.Value_StringValue{
+								StringValue: "hey " + in.GetStringValue(),
+							},
+						}, nil
+					}
+
+					return &_struct.Value{
+						Kind: &_struct.Value_StringValue{
+							StringValue: "I don't know what to answer",
+						},
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {reflect: true});
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestValue", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+
+				let respNumber = client.invoke("grpc.wrappers.testing.Service/TestValue", 12)
+				if (respNumber.message !== 42) {
+					throw new Error("expected to get '42', but got a " + respNumber.message)
+				}
+
+				let respBool = client.invoke("grpc.wrappers.testing.Service/TestValue", false)
+				if (respBool.message !== "I don't know what to answer") {
+					throw new Error("expected to get 'I don't know what to answer', but got a " + respBool.message)
+				}
+			`,
+			},
+		},
 	}
 
-	assertResponse := func(t *testing.T, cb codeBlock, err error, val goja.Value, ts testState) {
-		if isWindows && cb.windowsErr != "" && err != nil {
-			err = errors.New(strings.ReplaceAll(err.Error(), cb.windowsErr, cb.err))
-		}
-		if cb.err == "" {
-			assert.NoError(t, err)
-		} else {
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), cb.err)
-		}
-		if cb.val != nil {
-			require.NotNil(t, val)
-			assert.Equal(t, cb.val, val.Export())
-		}
-		if cb.asserts != nil {
-			cb.asserts(t, ts.httpBin, ts.samples, err)
-		}
-	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ts := setup(t)
-
-			m, ok := New().NewModuleInstance(ts.VU).(*ModuleInstance)
-			require.True(t, ok)
-			require.NoError(t, ts.VU.Runtime().Set("grpc", m.Exports().Named))
+			ts := newTestState(t)
 
 			// setup necessary environment if needed by a test
 			if tt.setup != nil {
 				tt.setup(ts.httpBin)
 			}
 
-			replace := func(code string) (goja.Value, error) {
-				return ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
-			}
-
-			val, err := replace(tt.initString.code)
+			val, err := ts.Run(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
-			registry := metrics.NewRegistry()
-			root, err := lib.NewGroup("", nil)
-			require.NoError(t, err)
-
-			state := &lib.State{
-				Group:     root,
-				Dialer:    ts.httpBin.Dialer,
-				TLSConfig: ts.httpBin.TLSClientConfig,
-				Samples:   ts.samples,
-				Options: lib.Options{
-					SystemTags: metrics.NewSystemTagSet(
-						metrics.TagName,
-						metrics.TagURL,
-					),
-					UserAgent: null.StringFrom("k6-test"),
-				},
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
-			}
-			ts.MoveToVUContext(state)
-			val, err = replace(tt.vuString.code)
+			ts.ToVUContext()
+			val, err = ts.Run(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
 	}
@@ -887,38 +992,9 @@ func TestClient_TlsParameters(t *testing.T) {
 	clientAuth := "-----BEGIN CERTIFICATE-----\\nMIIBVzCB/6ADAgECAgkAg/SeNG3XqB0wCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwF\\nTXkgQ0EwIBcNMjIwMTIxMTUxMjM0WhgPMzAyMTA1MjQxNTEyMzRaMBExDzANBgNV\\nBAMMBmNsaWVudDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKM7OJQMYG4KLtDA\\ngZ8zOg2PimHMmQnjD2HtI4cSwIUJJnvHWLowbFe9fk6XeP9b3dK1ImUI++/EZdVr\\nABAcngejPzA9MA4GA1UdDwEB/wQEAwIBBjAMBgNVHRMBAf8EAjAAMB0GA1UdDgQW\\nBBSttJe1mcPEnBOZ6wvKPG4zL0m1CzAKBggqhkjOPQQDAgNHADBEAiBPSLgKA/r9\\nu/FW6W+oy6Odm1kdNMGCI472iTn545GwJgIgb3UQPOUTOj0IN4JLJYfmYyXviqsy\\nzk9eWNHFXDA9U6U=\\n-----END CERTIFICATE-----"
 	clientAuthKey := testingKey("-----BEGIN EC TESTING KEY-----\\nMHcCAQEEINDaMGkOT3thu1A0LfLJr3Jd011/aEG6OArmEQaujwgpoAoGCCqGSM49\\nAwEHoUQDQgAEozs4lAxgbgou0MCBnzM6DY+KYcyZCeMPYe0jhxLAhQkme8dYujBs\\nV71+Tpd4/1vd0rUiZQj778Rl1WsAEByeBw==\\n-----END EC TESTING KEY-----")
 	clientAuthKeyEncrypted := testingKey("-----BEGIN EC TESTING KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-256-CBC,3E311E9B602231BFB5C752071EE7D652\\n\\nsAKeqbacug0v4ruE1A0CACwGVEGBQVOl1CiGVp5RsxgNZKXzMS6EsTTNLw378coF\\nKXbF+he05HIuzToOz2ANLXov1iCrVpotKVB4l2obTQvg+5VET902ky99Mc9Us7jd\\nUwW8LpXlSlhcNWuUfK6wyosL42TbcIxjqZWaESW+6ww=\\n-----END EC TESTING KEY-----")
-	clientAuthBad := "-----BEGIN CERTIFICATE-----\\nMIIB2TCCAX6gAwIBAgIUJIZKiR78AH2ioZ+Jae/sElgH85kwCgYIKoZIzj0EAwIw\\nEDEOMAwGA1UEAwwFTXkgQ0EwHhcNMjMwNzA3MTAyNjQ2WhcNMjQwNzA2MTAyNjQ2\\nWjARMQ8wDQYDVQQDDAZjbGllbnQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASj\\nOziUDGBuCi7QwIGfMzoNj4phzJkJ4w9h7SOHEsCFCSZ7x1i6MGxXvX5Ol3j/W93S\\ntSJlCPvvxGXVawAQHJ4Ho4G0MIGxMAkGA1UdEwQCMAAwEQYJYIZIAYb4QgEBBAQD\\nAgWgMCwGCWCGSAGG+EIBDQQfFh1Mb2NhbCBUZXN0IENsaWVudCBDZXJ0aWZpY2F0\\nZTAdBgNVHQ4EFgQUrbSXtZnDxJwTmesLyjxuMy9JtQswHwYDVR0jBBgwFoAUpLpA\\nQPJYBb7wSQGCrKElEfj1+9YwDgYDVR0PAQH/BAQDAgXgMBMGA1UdJQQMMAoGCCsG\\nAQUFBwMEMAoGCCqGSM49BAMCA0kAMEYCIQDcHrzug3V3WvUU+tEKhG1C4cPG5rPJ\\n/y3oOoM0roOnsgIhAP23UmiC6Qdgj+MOhXWSaNt3exWvlxdKmLm2edkxaTs+\\n-----END CERTIFICATE-----"
 
 	trivialKeyPassword := "abc123"
-
-	type testState struct {
-		*modulestest.Runtime
-		httpBin *httpmultibin.HTTPMultiBin
-		samples chan metrics.SampleContainer
-	}
-
-	setup := func(t *testing.T) testState {
-		t.Helper()
-
-		tb := httpmultibin.NewHTTPMultiBin(t)
-		samples := make(chan metrics.SampleContainer, 1000)
-		testRuntime := modulestest.NewRuntime(t)
-
-		cwd, err := os.Getwd() //nolint:golint,forbidigo
-		require.NoError(t, err)
-		fs := fsext.NewOsFs()
-		if isWindows {
-			fs = fsext.NewTrimFilePathSeparatorFs(fs)
-		}
-		testRuntime.VU.InitEnvField.CWD = &url.URL{Path: cwd}
-		testRuntime.VU.InitEnvField.FileSystems = map[string]fsext.Fs{"file": fs}
-
-		return testState{
-			Runtime: testRuntime,
-			httpBin: tb,
-			samples: samples,
-		}
-	}
+	trivialWrongKeyPassword := "abc321"
 
 	tests := []testcase{
 		{
@@ -969,7 +1045,7 @@ func TestClient_TlsParameters(t *testing.T) {
 				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
 			},
 			initString: codeBlock{code: "var client = new grpc.Client();"},
-			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: "%s", cert: "%s", key: "%s" }});`, localHostCert, clientAuth, clientAuthKey)},
+			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});`, localHostCert, clientAuth, clientAuthKey)},
 		},
 		{
 			name: "ConnectTlsEncryptedKey",
@@ -986,48 +1062,12 @@ func TestClient_TlsParameters(t *testing.T) {
 			name:       "ConnectTlsEncryptedKeyDecryptionFailed",
 			initString: codeBlock{code: "var client = new grpc.Client();"},
 			vuString: codeBlock{
-				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cert: "%s", key: "%s", password: "abc321" }});`,
+				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cert: "%s", key: "%s", password: "%s" }});`,
 					clientAuth,
 					clientAuthKeyEncrypted,
+					trivialWrongKeyPassword,
 				),
 				err: "x509: decryption password incorrect",
-			},
-		},
-		{
-			name: "ConnectTlsClientCertNoClientAuth",
-			setup: func(tb *httpmultibin.HTTPMultiBin) {
-				clientCAPool := x509.NewCertPool()
-				clientCAPool.AppendCertsFromPEM(clientAuthCA)
-				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
-				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
-			},
-			initString: codeBlock{code: `var client = new grpc.Client();`},
-			vuString: codeBlock{
-				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});`,
-					localHostCert,
-					clientAuthBad,
-					clientAuthKey),
-				err: "remote error: tls: bad certificate",
-			},
-		},
-		{
-			name: "ConnectTlsClientCertWithPasswordNoClientAuth",
-			setup: func(tb *httpmultibin.HTTPMultiBin) {
-				clientCAPool := x509.NewCertPool()
-				clientCAPool.AppendCertsFromPEM(clientAuthCA)
-				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
-				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
-			},
-			initString: codeBlock{code: `var client = new grpc.Client();`},
-			vuString: codeBlock{
-				code: fmt.Sprintf(`
-				client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s", password: "%s" }});
-				`,
-					localHostCert,
-					clientAuthBad,
-					clientAuthKeyEncrypted,
-					trivialKeyPassword),
-				err: "remote error: tls: bad certificate",
 			},
 		},
 		{
@@ -1057,68 +1097,24 @@ func TestClient_TlsParameters(t *testing.T) {
 			},
 		},
 	}
-	assertResponse := func(t *testing.T, cb codeBlock, err error, val goja.Value, ts testState) {
-		if isWindows && cb.windowsErr != "" && err != nil {
-			err = errors.New(strings.ReplaceAll(err.Error(), cb.windowsErr, cb.err))
-		}
-		if cb.err == "" {
-			assert.NoError(t, err)
-		} else {
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), cb.err)
-		}
-		if cb.val != nil {
-			require.NotNil(t, val)
-			assert.Equal(t, cb.val, val.Export())
-		}
-		if cb.asserts != nil {
-			cb.asserts(t, ts.httpBin, ts.samples, err)
-		}
-	}
+
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ts := setup(t)
-
-			m, ok := New().NewModuleInstance(ts.VU).(*ModuleInstance)
-			require.True(t, ok)
-			require.NoError(t, ts.VU.Runtime().Set("grpc", m.Exports().Named))
+			ts := newTestState(t)
 
 			// setup necessary environment if needed by a test
 			if tt.setup != nil {
 				tt.setup(ts.httpBin)
 			}
 
-			replace := func(code string) (goja.Value, error) {
-				return ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
-			}
-
-			val, err := replace(tt.initString.code)
+			val, err := ts.Run(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
-			registry := metrics.NewRegistry()
-			root, err := lib.NewGroup("", nil)
-			require.NoError(t, err)
-
-			state := &lib.State{
-				Group:     root,
-				Dialer:    ts.httpBin.Dialer,
-				TLSConfig: ts.httpBin.TLSClientConfig,
-				Samples:   ts.samples,
-				Options: lib.Options{
-					SystemTags: metrics.NewSystemTagSet(
-						metrics.TagName,
-						metrics.TagURL,
-					),
-					UserAgent: null.StringFrom("k6-test"),
-				},
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
-			}
-			ts.MoveToVUContext(state)
-			val, err = replace(tt.vuString.code)
+			ts.ToVUContext()
+			val, err = ts.Run(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
 	}
@@ -1197,92 +1193,30 @@ func TestDebugStat(t *testing.T) {
 	}
 }
 
-func TestClientInvokeHeadersDeprecated(t *testing.T) {
-	t.Parallel()
-
-	registry := metrics.NewRegistry()
-
-	logHook := testutils.NewLogHook(logrus.WarnLevel)
-	testLog := logrus.New()
-	testLog.AddHook(logHook)
-	testLog.SetOutput(io.Discard)
-
-	rt := goja.New()
-	c := Client{
-		vu: &modulestest.VU{
-			StateField: &lib.State{
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Logger:         testLog,
-				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
-			},
-			RuntimeField: rt,
-		},
-	}
-
-	params := rt.ToValue(map[string]interface{}{
-		"headers": map[string]interface{}{
-			"X-HEADER-FOO": "bar",
-		},
-	})
-	_, err := c.parseInvokeParams(params)
-	require.NoError(t, err)
-
-	entries := logHook.Drain()
-	require.Len(t, entries, 1)
-	require.Contains(t, entries[0].Message, "headers property is deprecated")
-}
-
 func TestClientLoadProto(t *testing.T) {
 	t.Parallel()
 
-	type testState struct {
-		*modulestest.Runtime
-		httpBin *httpmultibin.HTTPMultiBin
-		samples chan metrics.SampleContainer
-	}
-	setup := func(t *testing.T) testState {
-		t.Helper()
+	ts := newTestState(t)
 
-		tb := httpmultibin.NewHTTPMultiBin(t)
-		samples := make(chan metrics.SampleContainer, 1000)
-		testRuntime := modulestest.NewRuntime(t)
-
-		cwd, err := os.Getwd() //nolint:forbidigo
-		require.NoError(t, err)
-		fs := fsext.NewOsFs()
-		if isWindows {
-			fs = fsext.NewTrimFilePathSeparatorFs(fs)
-		}
-		testRuntime.VU.InitEnvField.CWD = &url.URL{Path: cwd}
-		testRuntime.VU.InitEnvField.FileSystems = map[string]fsext.Fs{"file": fs}
-
-		return testState{
-			Runtime: testRuntime,
-			httpBin: tb,
-			samples: samples,
-		}
+	tt := testcase{
+		name: "LoadNestedTypesProto",
+		initString: codeBlock{
+			code: `
+			var client = new grpc.Client();
+			client.load([], "../../../../lib/testutils/httpmultibin/nested_types/nested_types.proto");`,
+		},
 	}
 
-	ts := setup(t)
-
-	m, ok := New().NewModuleInstance(ts.VU).(*ModuleInstance)
-	require.True(t, ok)
-	require.NoError(t, ts.VU.Runtime().Set("grpc", m.Exports().Named))
-
-	code := `
-		var client = new grpc.Client();
-		client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/nested_types.proto");`
-
-	_, err := ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
-	assert.Nil(t, err, "It was not expected that there would be an error, but it got: %v", err)
+	val, err := ts.Run(tt.initString.code)
+	assertResponse(t, tt.initString, err, val, ts)
 
 	expectedTypes := []string{
-		"grpc.testing.Outer",
-		"grpc.testing.Outer.MiddleAA",
-		"grpc.testing.Outer.MiddleAA.Inner",
-		"grpc.testing.Outer.MiddleBB",
-		"grpc.testing.Outer.MiddleBB.Inner",
-		"grpc.testing.MeldOuter",
+		"grpc.testdata.nested.types.Outer",
+		"grpc.testdata.nested.types.Outer.MiddleAA",
+		"grpc.testdata.nested.types.Outer.MiddleAA.Inner",
+		"grpc.testdata.nested.types.Outer.MiddleBB",
+		"grpc.testdata.nested.types.Outer.MiddleBB.Inner",
+		"grpc.testdata.nested.types.MeldOuter",
 	}
 
 	for _, expected := range expectedTypes {
@@ -1291,4 +1225,47 @@ func TestClientLoadProto(t *testing.T) {
 		assert.NotNil(t, found, "Expected to find the message type %s, but an error occurred", expected)
 		assert.Nil(t, err, "It was not expected that there would be an error, but it got: %v", err)
 	}
+}
+
+func TestClientConnectionReflectMetadata(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestState(t)
+
+	reflection.Register(ts.httpBin.ServerGRPC)
+
+	initString := codeBlock{
+		code: `var client = new grpc.Client();`,
+	}
+	vuString := codeBlock{
+		code: `client.connect("GRPCBIN_ADDR", {reflect: true, reflectMetadata: {"x-test": "custom-header-for-reflection"}})`,
+	}
+
+	val, err := ts.Run(initString.code)
+	assertResponse(t, initString, err, val, ts)
+
+	ts.ToVUContext()
+
+	// this should trigger logging of the outgoing gRPC metadata
+	ts.VU.State().Options.HTTPDebug = null.NewString("full", true)
+
+	val, err = ts.Run(vuString.code)
+	assertResponse(t, vuString, err, val, ts)
+
+	entries := ts.loggerHook.Drain()
+
+	// since we enable debug logging, we should see the metadata in the logs
+	foundReflectionCall := false
+	for _, entry := range entries {
+		if strings.Contains(entry.Message, "ServerReflection/ServerReflectionInfo") {
+			foundReflectionCall = true
+
+			// check that the metadata is present
+			assert.Contains(t, entry.Message, "x-test: custom-header-for-reflection")
+			// check that user-agent header is present
+			assert.Contains(t, entry.Message, "user-agent: k6-test")
+		}
+	}
+
+	assert.True(t, foundReflectionCall, "expected to find a reflection call in the logs, but didn't")
 }

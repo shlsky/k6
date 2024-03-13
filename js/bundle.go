@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"runtime"
 
 	"github.com/dop251/goja"
@@ -40,24 +39,6 @@ type Bundle struct {
 
 	callableExports map[string]struct{}
 	ModuleResolver  *modules.ModuleResolver
-}
-
-// TODO: this is to be removed once this is not a warning and it can be moved to the registry
-// https://github.com/grafana/k6/issues/3065
-func (b *Bundle) checkMetricNamesForPrometheusCompatibility() {
-	const (
-		nameRegexString = "^[a-zA-Z_][a-zA-Z0-9_]{1,63}$"
-		badNameWarning  = "Metric name should only include ASCII letters, numbers and underscores. " +
-			"This name will stop working in k6 v0.48.0 (around December 2023)."
-	)
-
-	compileNameRegex := regexp.MustCompile(nameRegexString)
-
-	for _, metric := range b.preInitState.Registry.All() {
-		if !compileNameRegex.MatchString(metric.Name) {
-			b.preInitState.Logger.WithField("name", metric.Name).Warn(badNameWarning)
-		}
-	}
 }
 
 // A BundleInstance is a self-contained instance of a Bundle.
@@ -131,8 +112,6 @@ func newBundle(
 	if err != nil {
 		return nil, err
 	}
-
-	bundle.checkMetricNamesForPrometheusCompatibility()
 
 	return bundle, nil
 }
@@ -331,7 +310,7 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, e
 	if err != nil {
 		var exception *goja.Exception
 		if errors.As(err, &exception) {
-			err = &scriptException{inner: exception}
+			err = &scriptExceptionError{inner: exception}
 		}
 		return nil, err
 	}

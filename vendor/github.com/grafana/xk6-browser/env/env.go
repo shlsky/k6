@@ -1,7 +1,10 @@
 // Package env provides types to interact with environment setup.
 package env
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 // Execution specific.
 const (
@@ -62,11 +65,34 @@ const (
 	LogCategoryFilter = "K6_BROWSER_LOG_CATEGORY_FILTER"
 )
 
+// Tracing.
+const (
+	// TracesMetadata is an environment variable that can be used to
+	// set additional metadata to be included in the generated traces.
+	// The format must comply with: key1=value1,key2=value2,...
+	TracesMetadata = "K6_BROWSER_TRACES_METADATA"
+)
+
+// Screenshots.
+const (
+	// ScreenshotsOutput can be used to configure the browser module
+	// to upload screenshots to a remote location instead of saving
+	// to the local disk.
+	ScreenshotsOutput = "K6_BROWSER_SCREENSHOTS_OUTPUT"
+)
+
+// Infrastructural.
+const (
+	// K6TestRunID represents the test run id. Note: this was taken from
+	// k6.
+	K6TestRunID = "K6_CLOUD_PUSH_REF_ID"
+)
+
 // LookupFunc defines a function to look up a key from the environment.
 type LookupFunc func(key string) (string, bool)
 
 // EmptyLookup is a LookupFunc that always returns "" and false.
-func EmptyLookup(key string) (string, bool) { return "", false }
+func EmptyLookup(_ string) (string, bool) { return "", false }
 
 // Lookup is a LookupFunc that uses os.LookupEnv.
 func Lookup(key string) (string, bool) { return os.LookupEnv(key) }
@@ -81,4 +107,27 @@ func ConstLookup(k, v string) LookupFunc {
 		}
 		return EmptyLookup(key)
 	}
+}
+
+// LookupBool returns the result of Lookup as a bool.
+// If the key does not exist or the value is not a valid bool, it returns false.
+// Otherwise it returns the bool value and true.
+func LookupBool(key string) (value bool, ok bool) {
+	v, ok := Lookup(key)
+	if !ok {
+		return false, false
+	}
+	bv, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, true
+	}
+	return bv, true
+}
+
+// IsBrowserHeadless returns true if the BrowserHeadless environment
+// variable is not set or set to true.
+// The default behaviour is to run the browser in headless mode.
+func IsBrowserHeadless() bool {
+	v, ok := LookupBool(BrowserHeadless)
+	return !ok || v
 }
