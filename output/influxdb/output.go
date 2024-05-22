@@ -33,6 +33,11 @@ const (
 	Bool
 )
 
+var member struct{}
+
+var PushMetricNames = map[string]struct{}{"checks": member, "dropped_iterations": member, "http_req_duration": member,
+	"grpc_req_duration": member, "ws_connecting": member, "ws_session_duration": member, "ws_sessions": member, "ws_ping": member, "ws_msgs_sent": member, "ws_msgs_received": member}
+
 // Output is the influxdb Output struct
 type Output struct {
 	output.SampleBuffer
@@ -136,6 +141,11 @@ func (o *Output) batchFromSamples(containers []metrics.SampleContainer) (client.
 			}
 			values["value"] = sample.Value
 			var p *client.Point
+
+			//不上传无用的指标
+			if _, ok := PushMetricNames[sample.Metric.Name]; !ok {
+				continue
+			}
 			p, err = client.NewPoint(
 				sample.Metric.Name,
 				tags,
