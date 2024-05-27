@@ -106,6 +106,8 @@ go build main.go
 ./main run --cpu-prof=cpu_pprof.prof --mem-prof=mem_pprof.prof  grpc.js
  go tool pprof mem_pprof.prof
 
+go tool pprof -http localhost:4001 cpu_pprof_d_t.prof
+
 打上版本号
 ░▒▓    ~/github/k6    master  git tag -a v0.45.1 -m "增加cpu mem pprof"                                                                                                                                                                                                             1 ✘  3s   18:12:01  ▓▒░
 

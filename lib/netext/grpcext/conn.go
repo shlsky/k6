@@ -97,6 +97,7 @@ func (c *Conn) Reflect(ctx context.Context) (*descriptorpb.FileDescriptorSet, er
 // Invoke executes a unary gRPC request.
 func (c *Conn) Invoke(
 	ctx context.Context,
+	options lib.Options,
 	url string,
 	md metadata.MD,
 	req Request,
@@ -154,12 +155,15 @@ func (c *Conn) Invoke(
 	}
 
 	if resp != nil {
-		msg, err := convert(marshaler, resp)
-		if err != nil {
-			return nil, fmt.Errorf("unable to convert response object to JSON: %w", err)
+		if !options.DiscardResponseBodies.Bool {
+			msg, err := convert(marshaler, resp)
+			if err != nil {
+				return nil, fmt.Errorf("unable to convert response object to JSON: %w", err)
+			}
+
+			response.Message = msg
 		}
 
-		response.Message = msg
 	}
 	return &response, nil
 }

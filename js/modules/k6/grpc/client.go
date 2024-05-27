@@ -280,6 +280,7 @@ func (c *Client) Invoke(
 	params goja.Value,
 ) (*grpcext.Response, error) {
 	state := c.vu.State()
+
 	if state == nil {
 		return nil, common.NewInitContextError("invoking RPC methods in the init context is not supported")
 	}
@@ -326,7 +327,7 @@ func (c *Client) Invoke(
 		TagsAndMeta:      &p.TagsAndMeta,
 	}
 
-	return c.conn.Invoke(ctx, method, p.Metadata, reqmsg)
+	return c.conn.Invoke(ctx, state.Options, method, p.Metadata, reqmsg)
 }
 
 // Close will close the client gRPC connection
