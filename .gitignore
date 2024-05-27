@@ -34,7 +34,6 @@ script.js
 /packaging/.env
 /packaging/*.gpg
 /main
-/proto/
 /proto_v1/
 /grpc.js
 /grpc1.js

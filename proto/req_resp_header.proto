@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package svc;
+option go_package = "code.bydev.io/trading/idl/pb/svc";
+
+import "enums/eopplatform/op_platform.proto";
+import "enums/ecoin/coin.proto";
+import "enums/eaction/action.proto";
+import "enums/ereqgrouptype/req_group_type.proto";
+import "enums/ebizlinktype/biz_link_type.proto";
+import "enums/epreload/preload.proto";
+
+message ReqRespHeader {
+    // NEXT: 42
+
+    string b3 = 1; // 符合b3规范的traceId
+    string req_from = 2; // 可以传入处理当前请求的api机器ip (兼容撮合的from_k=k123|k456)
+    string req_id = 3; // 请求唯一id, 如果非空则服务端会根据这个值做幂等防护
+
+    int64 user_id = 20; // 请求的用户id (将<user_id,coin>放在header头里方便框架做路由判断)
+    enums.ecoin.Coin coin = 21; // `symbol`|`position_idx` 包含在req_body中
+    // 请求大类
+    enums.ereqgrouptype.ReqGroupType req_group_type = 33;
+    enums.eaction.Action action = 16;
+    int64 req_num = 17; // 请求被accept时关联的i++编号
+
+    string client_ip = 4; // 发起请求的源ip地址 (用户请求取外网ip, 内部请求取内网ip)
+    enums.eopplatform.OpPlatform op_platform = 5; // platform: pc/api/ios/android/api.???
+    string op_from = 6; // 发起请求的来源平台 (用户请求取platform, 内部请求取模块缩写:类似req_from)
+
+    int64 req_expire_at_e9 = 7; // 请求过期的逻辑时间点, 如果开始处理请求的时间已经超过这个点, 直接报错
+    int64 req_init_at_e9 = 8; // 传入serverZeroTime, 方便后续链路测算整体耗时
+
+    string from_k = 18; // k123|k456|k789|kabc
+    int64 kafka_offset = 19; // kafka中的topic的游标
+    int64 req_seq_at_e9 = 9; // 请求定序时间戳
+
+    int64 req_recv_at_e9 = 10; // 请求被服务端收到内存的时间戳
+    int64 proc_begin_at_e9 = 11; // 请求路由到核心线程开始处理的时间戳
+    int64 proc_end_at_e9 = 12; // 请求处理结束的时间戳
+    int64 result_produce_at_e9 = 13; // 结果准备发起持久化的时间戳
+    int64 result_append_at_e9 = 14; // 结果持久化落盘的时间戳
+    int64 result_callback_at_e9 = 15; // 结果持久化后回调时间戳
+
+    string pass_through_client_flag = 22; // 透传客户端跟踪标志
+
+    bool trading_banned = 23; // 当前user_id+coin是否被交易封禁, 若=true则只能做下平仓单 (reqHeader或reqBody为true都可以)
+
+    string rate_limit_key = 24; // [in]由api层根据请求信息拼接出的频率限制key (不同key之间相互独立)
+    int64 rate_limit_upper_bound = 25; // [in]当前key对应的频率限制上限值 (per minute)
+    int64 rate_limit_cost = 26; // [in]当前key对应的频率限制本次消耗值
+    int64 rate_limit_remain = 27; // [out]当前key对应的频率限制剩余值
+    int64 rate_limit_reset_ms = 28; // [out]当前key对应的频率限制重置时间戳(精确到毫秒)
+    string open_trace_id  = 29; // 支持open trace, 由于open-trace不支持stream方式，所以添加业务字段传输trace-id
+
+    int64 account_id = 30; // 账户ID
+    string settle_term = 31; // 账期
+    string svc_token = 32; // 服务携带token
+    int64 cross_seq = 34;// 撮合offset, 非必填，建议透传
+    int32 cross_seq_index = 35;// 同一crossSeq时，撮合记录的索引, 非必填，建议透传
+    int32 symbol_id = 36;
+    enums.ebizlinktype.BizLinkType bizLinkType = 37;// 区分usdc普客/极简，统保业务
+    int64 margin_seq = 39; // 请求在margin_request中的定序号
+    enums.epreload.Preload preload = 40; // 标记当前user_id的preload移入移出; 非必填
+    int64 unload_version = 41; // unloadUserData下发时的版本，用于再次加载时校验; 非必填
+    int32 smp_group = 42; // 防自撮合用户组
+};
