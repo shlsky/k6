@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/errext"
+	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/event"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
@@ -43,22 +45,22 @@ type Bundle struct {
 
 // A BundleInstance is a self-contained instance of a Bundle.
 type BundleInstance struct {
-	Runtime *goja.Runtime
+	Runtime *sobek.Runtime
 
 	// TODO: maybe just have a reference to the Bundle? or save and pass rtOpts?
 	env map[string]string
 
-	mainModuleExports *goja.Object
+	mainModuleExports *sobek.Object
 	moduleVUImpl      *moduleVUImpl
 }
 
-func (bi *BundleInstance) getCallableExport(name string) goja.Callable {
-	fn, ok := goja.AssertFunction(bi.getExported(name))
+func (bi *BundleInstance) getCallableExport(name string) sobek.Callable {
+	fn, ok := sobek.AssertFunction(bi.getExported(name))
 	_ = ok // TODO maybe return it
 	return fn
 }
 
-func (bi *BundleInstance) getExported(name string) goja.Value {
+func (bi *BundleInstance) getExported(name string) sobek.Value {
 	return bi.mainModuleExports.Get(name)
 }
 
@@ -85,9 +87,14 @@ func newBundle(
 		CompatibilityMode: compatMode,
 		callableExports:   make(map[string]struct{}),
 		filesystems:       filesystems,
-		pwd:               loader.Dir(src.URL),
+		pwd:               src.PWD,
 		preInitState:      piState,
 	}
+
+	if bundle.pwd == nil {
+		bundle.pwd = loader.Dir(src.URL)
+	}
+
 	c := bundle.newCompiler(piState.Logger)
 	bundle.ModuleResolver = modules.NewModuleResolver(getJSModules(), generateFileLoad(bundle), c)
 
@@ -96,7 +103,7 @@ func newBundle(
 	// TODO use a real context
 	vuImpl := &moduleVUImpl{
 		ctx:     context.Background(),
-		runtime: goja.New(),
+		runtime: sobek.New(),
 		events: events{
 			global: piState.Events,
 			local:  event.NewEventSystem(100, piState.Logger),
@@ -107,6 +114,7 @@ func newBundle(
 	if err != nil {
 		return nil, err
 	}
+	bundle.ModuleResolver.Lock()
 
 	err = bundle.populateExports(updateOptions, exports)
 	if err != nil {
@@ -165,10 +173,10 @@ func (b *Bundle) makeArchive() *lib.Archive {
 }
 
 // populateExports validates and extracts exported objects
-func (b *Bundle) populateExports(updateOptions bool, exports *goja.Object) error {
+func (b *Bundle) populateExports(updateOptions bool, exports *sobek.Object) error {
 	for _, k := range exports.Keys() {
 		v := exports.Get(k)
-		if _, ok := goja.AssertFunction(v); ok && k != consts.Options {
+		if _, ok := sobek.AssertFunction(v); ok && k != consts.Options {
 			b.callableExports[k] = struct{}{}
 			continue
 		}
@@ -185,7 +193,10 @@ func (b *Bundle) populateExports(updateOptions bool, exports *goja.Object) error
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(&b.Options); err != nil {
 				if uerr := json.Unmarshal(data, &b.Options); uerr != nil {
-					return uerr
+					return errext.WithAbortReasonIfNone(
+						errext.WithExitCodeIfNone(uerr, exitcodes.InvalidConfig),
+						errext.AbortedByScriptError,
+					)
 				}
 				b.preInitState.Logger.WithError(err).Warn("There were unknown fields in the options exported in the script")
 			}
@@ -209,7 +220,7 @@ func (b *Bundle) Instantiate(ctx context.Context, vuID uint64) (*BundleInstance,
 	// runtime, but no state, to allow module-provided types to function within the init context.
 	vuImpl := &moduleVUImpl{
 		ctx:     ctx,
-		runtime: goja.New(),
+		runtime: sobek.New(),
 		events: events{
 			global: b.preInitState.Events,
 			local:  event.NewEventSystem(100, b.preInitState.Logger),
@@ -231,7 +242,7 @@ func (b *Bundle) Instantiate(ctx context.Context, vuID uint64) (*BundleInstance,
 	// Grab any exported functions that could be executed. These were
 	// already pre-validated in cmd.validateScenarioConfig(), just get them here.
 	jsOptions := exports.Get(consts.Options)
-	var jsOptionsObj *goja.Object
+	var jsOptionsObj *sobek.Object
 	if common.IsNullish(jsOptions) {
 		jsOptionsObj = vuImpl.runtime.NewObject()
 		err := exports.Set(consts.Options, jsOptionsObj)
@@ -262,7 +273,7 @@ func (b *Bundle) newCompiler(logger logrus.FieldLogger) *compiler.Compiler {
 	return c
 }
 
-func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, error) {
+func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*sobek.Object, error) {
 	rt := vuImpl.runtime
 	err := b.setupJSRuntime(rt, int64(vuID), b.preInitState.Logger)
 	if err != nil {
@@ -276,15 +287,15 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, e
 	}
 
 	modSys := modules.NewModuleSystem(b.ModuleResolver, vuImpl)
-	unbindInit := b.setInitGlobals(rt, vuImpl, modSys)
+	b.setInitGlobals(rt, vuImpl, modSys)
+	modules.ExportGloballyModule(rt, modSys, "k6/timers")
 	vuImpl.initEnv = initenv
 	defer func() {
-		unbindInit()
 		vuImpl.initEnv = nil
 	}()
 
 	// TODO: make something cleaner for interrupting scripts, and more unified
-	// (e.g. as a part of the event loop or RunWithPanicCatching()?
+	// (e.g. as a part of the event loop?
 	initDone := make(chan struct{})
 	go func() {
 		select {
@@ -295,20 +306,17 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, e
 		close(initDone)
 	}()
 
-	var exportsV goja.Value
-	err = common.RunWithPanicCatching(b.preInitState.Logger, rt, func() error {
-		return vuImpl.eventLoop.Start(func() error {
-			//nolint:govet // here we shadow err on purpose
-			var err error
-			exportsV, err = modSys.RunSourceData(b.sourceData)
-			return err
-		})
+	var exportsV sobek.Value
+	err = vuImpl.eventLoop.Start(func() error {
+		var err error
+		exportsV, err = modSys.RunSourceData(b.sourceData)
+		return err
 	})
 
 	<-initDone
 
 	if err != nil {
-		var exception *goja.Exception
+		var exception *sobek.Exception
 		if errors.As(err, &exception) {
 			err = &scriptExceptionError{inner: exception}
 		}
@@ -334,7 +342,7 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, e
 	return exports, nil
 }
 
-func (b *Bundle) setupJSRuntime(rt *goja.Runtime, vuID int64, logger logrus.FieldLogger) error {
+func (b *Bundle) setupJSRuntime(rt *sobek.Runtime, vuID int64, logger logrus.FieldLogger) error {
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 	rt.SetRandSource(common.NewRandSource())
 
@@ -370,14 +378,14 @@ type requireImpl struct {
 	internal      *modules.LegacyRequireImpl
 }
 
-func (r *requireImpl) require(specifier string) (*goja.Object, error) {
+func (r *requireImpl) require(specifier string) (*sobek.Object, error) {
 	if !r.inInitContext() {
 		return nil, fmt.Errorf(cantBeUsedOutsideInitContextMsg, "require")
 	}
 	return r.internal.Require(specifier)
 }
 
-func (b *Bundle) setInitGlobals(rt *goja.Runtime, vu *moduleVUImpl, modSys *modules.ModuleSystem) (unset func()) {
+func (b *Bundle) setInitGlobals(rt *sobek.Runtime, vu *moduleVUImpl, modSys *modules.ModuleSystem) {
 	mustSet := func(k string, v interface{}) {
 		if err := rt.Set(k, v); err != nil {
 			panic(fmt.Errorf("failed to set '%s' global object: %w", k, err))
@@ -391,7 +399,7 @@ func (b *Bundle) setInitGlobals(rt *goja.Runtime, vu *moduleVUImpl, modSys *modu
 
 	mustSet("require", impl.require)
 
-	mustSet("open", func(filename string, args ...string) (goja.Value, error) {
+	mustSet("open", func(filename string, args ...string) (sobek.Value, error) {
 		// TODO fix in stack traces
 		if vu.state != nil {
 			return nil, fmt.Errorf(cantBeUsedOutsideInitContextMsg, "open")
@@ -404,11 +412,6 @@ func (b *Bundle) setInitGlobals(rt *goja.Runtime, vu *moduleVUImpl, modSys *modu
 		pwd := impl.internal.CurrentlyRequiredModule()
 		return openImpl(rt, b.filesystems["file"], &pwd, filename, args...)
 	})
-
-	return func() {
-		mustSet("require", goja.Undefined())
-		mustSet("open", goja.Undefined())
-	}
 }
 
 func generateFileLoad(b *Bundle) modules.FileLoader {

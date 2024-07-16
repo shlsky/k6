@@ -4,17 +4,20 @@ package compiler
 
 import (
 	_ "embed" // we need this for embedding Babel
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
+	"github.com/grafana/sobek"
+	"github.com/grafana/sobek/ast"
+	"github.com/grafana/sobek/parser"
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/lib"
@@ -28,26 +31,26 @@ var (
 		// "presets": []string{"latest"},
 		"plugins": []interface{}{
 			// es2015 https://github.com/babel/babel/blob/v6.26.0/packages/babel-preset-es2015/src/index.js
-			// in goja
+			// in Sobek
 			// []interface{}{"transform-es2015-template-literals", map[string]interface{}{"loose": false, "spec": false}},
-			// "transform-es2015-literals", // in goja
-			// "transform-es2015-function-name", // in goja
-			// []interface{}{"transform-es2015-arrow-functions", map[string]interface{}{"spec": false}}, // in goja
-			// "transform-es2015-block-scoped-functions", // in goja
-			// []interface{}{"transform-es2015-classes", map[string]interface{}{"loose": false}}, // in goja
-			// "transform-es2015-object-super", // in goja
-			// "transform-es2015-shorthand-properties", // in goja
-			// "transform-es2015-duplicate-keys", // in goja
-			// []interface{}{"transform-es2015-computed-properties", map[string]interface{}{"loose": false}}, // in goja
-			// "transform-es2015-for-of", // in goja
-			// "transform-es2015-sticky-regex", // in goja
-			// "transform-es2015-unicode-regex", // in goja
-			// "check-es2015-constants", // in goja
-			// []interface{}{"transform-es2015-spread", map[string]interface{}{"loose": false}}, // in goja
-			// "transform-es2015-parameters", // in goja
-			// []interface{}{"transform-es2015-destructuring", map[string]interface{}{"loose": false}}, // in goja
-			// "transform-es2015-block-scoping", // in goja
-			// "transform-es2015-typeof-symbol", // in goja
+			// "transform-es2015-literals", // in Sobek
+			// "transform-es2015-function-name", // in Sobek
+			// []interface{}{"transform-es2015-arrow-functions", map[string]interface{}{"spec": false}}, // in Sobek
+			// "transform-es2015-block-scoped-functions", // in Sobek
+			// []interface{}{"transform-es2015-classes", map[string]interface{}{"loose": false}}, // in Sobek
+			// "transform-es2015-object-super", // in Sobek
+			// "transform-es2015-shorthand-properties", // in Sobek
+			// "transform-es2015-duplicate-keys", // in Sobek
+			// []interface{}{"transform-es2015-computed-properties", map[string]interface{}{"loose": false}}, // in Sobek
+			// "transform-es2015-for-of", // in Sobek
+			// "transform-es2015-sticky-regex", // in Sobek
+			// "transform-es2015-unicode-regex", // in Sobek
+			// "check-es2015-constants", // in Sobek
+			// []interface{}{"transform-es2015-spread", map[string]interface{}{"loose": false}}, // in Sobek
+			// "transform-es2015-parameters", // in Sobek
+			// []interface{}{"transform-es2015-destructuring", map[string]interface{}{"loose": false}}, // in Sobek
+			// "transform-es2015-block-scoping", // in Sobek
+			// "transform-es2015-typeof-symbol", // in Sobek
 			// all the other module plugins are just dropped
 			[]interface{}{"transform-es2015-modules-commonjs", map[string]interface{}{"loose": false}},
 			// "transform-regenerator", // Doesn't really work unless regeneratorRuntime is also added
@@ -56,7 +59,7 @@ var (
 			// "transform-exponentiation-operator",
 
 			// es2017 https://github.com/babel/babel/blob/v6.26.0/packages/babel-preset-es2017/src/index.js
-			// "syntax-trailing-function-commas", // in goja
+			// "syntax-trailing-function-commas", // in Sobek
 			// "transform-async-to-generator", // Doesn't really work unless regeneratorRuntime is also added
 		},
 		"ast":           false,
@@ -70,11 +73,11 @@ var (
 	maxSrcLenForBabelSourceMap     = 250 * 1024 //nolint:gochecknoglobals
 	maxSrcLenForBabelSourceMapOnce sync.Once    //nolint:gochecknoglobals
 
-	onceBabelCode      sync.Once     //nolint:gochecknoglobals
-	globalBabelCode    *goja.Program //nolint:gochecknoglobals
-	errGlobalBabelCode error         //nolint:gochecknoglobals
-	onceBabel          sync.Once     //nolint:gochecknoglobals
-	globalBabel        *babel        //nolint:gochecknoglobals
+	onceBabelCode      sync.Once      //nolint:gochecknoglobals
+	globalBabelCode    *sobek.Program //nolint:gochecknoglobals
+	errGlobalBabelCode error          //nolint:gochecknoglobals
+	onceBabel          sync.Once      //nolint:gochecknoglobals
+	globalBabel        *babel         //nolint:gochecknoglobals
 )
 
 const (
@@ -82,7 +85,7 @@ const (
 	sourceMapURLFromBabel             = "k6://internal-should-not-leak/file.map"
 )
 
-// A Compiler compiles JavaScript source code (ES5.1 or ES6) into a goja.Program
+// A Compiler compiles JavaScript source code (ES5.1 or ES6) into a sobek.Program
 type Compiler struct {
 	logger  logrus.FieldLogger
 	babel   *babel
@@ -121,7 +124,7 @@ func (c *Compiler) Transform(src, filename string, inputSrcMap []byte) (code str
 		// TODO: drop this code and everything it's connected to when babel is dropped
 		v := os.Getenv(maxSrcLenForBabelSourceMapVarName) //nolint:forbidigo
 		if len(v) > 0 {
-			i, err := strconv.Atoi(v) //nolint:govet // we shadow err on purpose
+			i, err := strconv.Atoi(v)
 			if err != nil {
 				c.logger.Warnf("Tried to parse %q from %s as integer but couldn't %s\n",
 					v, maxSrcLenForBabelSourceMapVarName, err)
@@ -157,120 +160,167 @@ type Options struct {
 	Strict            bool
 }
 
-// compilationState is helper struct to keep the state of a compilation
-type compilationState struct {
+// parsingState is helper struct to keep the state of a compilation
+type parsingState struct {
 	// set when we couldn't load external source map so we can try parsing without loading it
 	couldntLoadSourceMap bool
 	// srcMap is the current full sourceMap that has been generated read so far
-	srcMap      []byte
-	srcMapError error
-	wrapped     bool // whether the original source is wrapped in a function to make it a commonjs module
+	srcMap            []byte
+	srcMapError       error
+	wrapped           bool // whether the original source is wrapped in a function to make it a commonjs module
+	compatibilityMode lib.CompatibilityMode
+	logger            logrus.FieldLogger
+
+	loader func(string) ([]byte, error)
 
 	compiler *Compiler
 }
 
-// Compile the program in the given CompatibilityMode, wrapping it between pre and post code
-// TODO isESM will be used once goja support ESM modules natively
-func (c *Compiler) Compile(src, filename string, isESM bool) (*goja.Program, string, error) {
-	return c.compileImpl(src, filename, !isESM, c.Options.CompatibilityMode, nil)
+// Parse parses the provided source. It wraps as the same as CommonJS support.
+// The returned program can be compiled directly by Sobek.
+// Additionally, it returns the end code that has been parsed including any required transformations.
+func (c *Compiler) Parse(
+	src, filename string, wrap bool,
+) (prg *ast.Program, finalCode string, err error) {
+	state := &parsingState{
+		loader:            c.Options.SourceMapLoader,
+		wrapped:           wrap,
+		compatibilityMode: c.Options.CompatibilityMode,
+		logger:            c.logger,
+		compiler:          c,
+	}
+	return state.parseImpl(src, filename, wrap)
 }
 
-// sourceMapLoader is to be used with goja's WithSourceMapLoader
+// sourceMapLoader is to be used with Sobek's WithSourceMapLoader
 // it not only gets the file from disk in the simple case, but also returns it if the map was generated from babel
 // additioanlly it fixes off by one error in commonjs dependencies due to having to wrap them in a function.
-func (c *compilationState) sourceMapLoader(path string) ([]byte, error) {
+func (ps *parsingState) sourceMapLoader(path string) ([]byte, error) {
 	if path == sourceMapURLFromBabel {
-		if c.wrapped {
-			return c.increaseMappingsByOne(c.srcMap)
+		if ps.wrapped {
+			return ps.increaseMappingsByOne(ps.srcMap)
 		}
-		return c.srcMap, nil
+		return ps.srcMap, nil
 	}
-	c.srcMap, c.srcMapError = c.compiler.Options.SourceMapLoader(path)
-	if c.srcMapError != nil {
-		c.couldntLoadSourceMap = true
-		return nil, c.srcMapError
+	ps.srcMap, ps.srcMapError = ps.loader(path)
+	if ps.srcMapError != nil {
+		ps.couldntLoadSourceMap = true
+		return nil, ps.srcMapError
 	}
-	_, c.srcMapError = sourcemap.Parse(path, c.srcMap)
-	if c.srcMapError != nil {
-		c.couldntLoadSourceMap = true
-		c.srcMap = nil
-		return nil, c.srcMapError
+	_, ps.srcMapError = sourcemap.Parse(path, ps.srcMap)
+	if ps.srcMapError != nil {
+		ps.couldntLoadSourceMap = true
+		ps.srcMap = nil
+		return nil, ps.srcMapError
 	}
-	if c.wrapped {
-		return c.increaseMappingsByOne(c.srcMap)
+	if ps.wrapped {
+		return ps.increaseMappingsByOne(ps.srcMap)
 	}
-	return c.srcMap, nil
+	return ps.srcMap, nil
 }
 
-func (c *Compiler) compileImpl(
-	src, filename string, wrap bool, compatibilityMode lib.CompatibilityMode, srcMap []byte,
-) (*goja.Program, string, error) {
+func (ps *parsingState) parseImpl(src, filename string, wrap bool) (*ast.Program, string, error) {
 	code := src
-	state := compilationState{srcMap: srcMap, compiler: c, wrapped: wrap}
 	if wrap { // the lines in the sourcemap (if available) will be fixed by increaseMappingsByOne
-		code = "(function(module, exports){\n" + code + "\n})\n"
+		code = ps.wrap(code, filename)
+		ps.wrapped = true
 	}
 	opts := parser.WithDisableSourceMaps
-	if c.Options.SourceMapLoader != nil {
-		opts = parser.WithSourceMapLoader(state.sourceMapLoader)
+	if ps.loader != nil {
+		opts = parser.WithSourceMapLoader(ps.sourceMapLoader)
 	}
-	ast, err := parser.ParseFile(nil, filename, code, 0, opts)
+	prg, err := parser.ParseFile(nil, filename, code, 0, opts)
 
-	if state.couldntLoadSourceMap {
-		state.couldntLoadSourceMap = false // reset
+	if ps.couldntLoadSourceMap {
+		ps.couldntLoadSourceMap = false // reset
 		// we probably don't want to abort scripts which have source maps but they can't be found,
 		// this also will be a breaking change, so if we couldn't we retry with it disabled
-		c.logger.WithError(state.srcMapError).Warnf("Couldn't load source map for %s", filename)
-		ast, err = parser.ParseFile(nil, filename, code, 0, parser.WithDisableSourceMaps)
+		ps.logger.WithError(ps.srcMapError).Warnf("Couldn't load source map for %s", filename)
+		prg, err = parser.ParseFile(nil, filename, code, 0, parser.WithDisableSourceMaps)
 	}
-	if err != nil {
-		if compatibilityMode == lib.CompatibilityModeExtended {
-			code, state.srcMap, err = c.Transform(src, filename, state.srcMap)
-			if err != nil {
-				return nil, code, err
-			}
-			// the compatibility mode "decreases" here as we shouldn't transform twice
-			return c.compileImpl(code, filename, wrap, lib.CompatibilityModeBase, state.srcMap)
+
+	if err == nil {
+		return prg, code, nil
+	}
+
+	if ps.compatibilityMode == lib.CompatibilityModeExtended {
+		code, ps.srcMap, err = ps.compiler.Transform(src, filename, ps.srcMap)
+		if err != nil {
+			return nil, code, err
 		}
-		return nil, code, err
+		ps.wrapped = false
+		ps.compatibilityMode = lib.CompatibilityModeBase
+		prg, code, err = ps.parseImpl(code, filename, wrap)
+		if err == nil && strings.Contains(src, "module.exports") {
+			ps.logger.Warningf(
+				"During the compilation of %q, it has been detected that the file combines ECMAScript modules (ESM) "+
+					"import/export syntax with commonJS module.exports. "+
+					"Mixing these two module systems is non-standard and will not be supported anymore in future releases. "+
+					"Please ensure to use solely one or the other syntax.",
+				filename)
+		}
+		return prg, code, err
 	}
-	pgm, err := goja.CompileAST(ast, c.Options.Strict)
-	return pgm, code, err
+	if ps.compatibilityMode == lib.CompatibilityModeExperimentalEnhanced {
+		code, ps.srcMap, err = esbuildTransform(src, filename)
+		if err != nil {
+			return nil, "", err
+		}
+		if ps.loader != nil {
+			// This hack is required for the source map to work
+			code += "\n//# sourceMappingURL=" + sourceMapURLFromBabel
+		}
+		ps.wrapped = false
+		ps.compatibilityMode = lib.CompatibilityModeBase
+		return ps.parseImpl(code, filename, wrap)
+	}
+	return nil, "", err
 }
 
-type babel struct {
-	vm        *goja.Runtime
-	this      goja.Value
-	transform goja.Callable
-	m         sync.Mutex
+func (ps *parsingState) wrap(code, filename string) string {
+	conditionalNewLine := ""
+	if index := strings.LastIndex(code, "//# sourceMappingURL="); index != -1 {
+		// the lines in the sourcemap (if available) will be fixed by increaseMappingsByOne
+		conditionalNewLine = "\n"
+		newCode, err := ps.updateInlineSourceMap(code, index)
+		if err != nil {
+			ps.logger.Warnf("while compiling %q, couldn't update its inline sourcemap which might lead "+
+				"to some line numbers being off: %s", filename, err)
+		} else {
+			code = newCode
+		}
+
+		// if there is no sourcemap - bork only the first line of code, but leave the remaining ones.
+	}
+	return "(function(module, exports){" + conditionalNewLine + code + "\n})\n"
 }
 
-func newBabel() (*babel, error) {
-	onceBabelCode.Do(func() {
-		globalBabelCode, errGlobalBabelCode = goja.Compile("<internal/k6/compiler/lib/babel.min.js>", babelSrc, false)
-	})
-	if errGlobalBabelCode != nil {
-		return nil, errGlobalBabelCode
+func (ps *parsingState) updateInlineSourceMap(code string, index int) (string, error) {
+	nextnewline := strings.Index(code[index:], "\n")
+	if nextnewline == -1 {
+		nextnewline = len(code[index:])
 	}
-	vm := goja.New()
-	_, err := vm.RunProgram(globalBabelCode)
-	if err != nil {
-		return nil, err
+	mapurl := code[index : index+nextnewline]
+	const base64EncodePrefix = "application/json;base64,"
+	if startOfBase64EncodedSourceMap := strings.Index(mapurl, base64EncodePrefix); startOfBase64EncodedSourceMap != -1 {
+		startOfBase64EncodedSourceMap += len(base64EncodePrefix)
+		b, err := base64.StdEncoding.DecodeString(mapurl[startOfBase64EncodedSourceMap:])
+		if err != nil {
+			return code, err
+		}
+		b, err = ps.increaseMappingsByOne(b)
+		if err != nil {
+			return code, err
+		}
+		encoded := base64.StdEncoding.EncodeToString(b)
+		code = code[:index] + "//# sourceMappingURL=data:application/json;base64," + encoded + code[index+nextnewline:]
 	}
-
-	this := vm.Get("Babel")
-	bObj := this.ToObject(vm)
-	result := &babel{vm: vm, this: this}
-	if err = vm.ExportTo(bObj.Get("transform"), &result.transform); err != nil {
-		return nil, err
-	}
-
-	return result, err
+	return code, nil
 }
 
 // increaseMappingsByOne increases the lines in the sourcemap by line so that it fixes the case where we need to wrap a
 // required file in a function to support/emulate commonjs
-func (c *compilationState) increaseMappingsByOne(sourceMap []byte) ([]byte, error) {
+func (ps *parsingState) increaseMappingsByOne(sourceMap []byte) ([]byte, error) {
 	var err error
 	m := make(map[string]interface{})
 	if err = json.Unmarshal(sourceMap, &m); err != nil {
@@ -293,7 +343,7 @@ func (c *compilationState) increaseMappingsByOne(sourceMap []byte) ([]byte, erro
 	} else {
 		// we have mappings but it's not a string - this is some kind of error
 		// we still won't abort the test but just not load the sourcemap
-		c.couldntLoadSourceMap = true
+		ps.couldntLoadSourceMap = true
 		return nil, errors.New(`missing "mappings" in sourcemap`)
 	}
 
@@ -343,7 +393,7 @@ func (b *babel) transformImpl(
 		return code, nil, nil
 	}
 
-	// this is to make goja try to load a sourcemap.
+	// this is to make Sobek try to load a sourcemap.
 	// it is a special url as it should never leak outside of this code
 	// additionally the alternative support from babel is to embed *the whole* sourcemap at the end
 	code += "\n//# sourceMappingURL=" + sourceMapURLFromBabel
@@ -351,8 +401,8 @@ func (b *babel) transformImpl(
 	if err != nil {
 		return code, nil, err
 	}
-	c, _ := goja.AssertFunction(stringify)
-	mapAsJSON, err := c(goja.Undefined(), vO.Get("map"))
+	c, _ := sobek.AssertFunction(stringify)
+	mapAsJSON, err := c(sobek.Undefined(), vO.Get("map"))
 	if err != nil {
 		return code, nil, err
 	}
@@ -418,4 +468,34 @@ func verifySourceMapForBabel(srcMap []byte) error {
 		return fmt.Errorf("source map missing required 'sources' field")
 	}
 	return nil
+}
+
+type babel struct {
+	vm        *sobek.Runtime
+	this      sobek.Value
+	transform sobek.Callable
+	m         sync.Mutex
+}
+
+func newBabel() (*babel, error) {
+	onceBabelCode.Do(func() {
+		globalBabelCode, errGlobalBabelCode = sobek.Compile("<internal/k6/compiler/lib/babel.min.js>", babelSrc, false)
+	})
+	if errGlobalBabelCode != nil {
+		return nil, errGlobalBabelCode
+	}
+	vm := sobek.New()
+	_, err := vm.RunProgram(globalBabelCode)
+	if err != nil {
+		return nil, err
+	}
+
+	this := vm.Get("Babel")
+	bObj := this.ToObject(vm)
+	result := &babel{vm: vm, this: this}
+	if err = vm.ExportTo(bObj.Get("transform"), &result.transform); err != nil {
+		return nil, err
+	}
+
+	return result, err
 }

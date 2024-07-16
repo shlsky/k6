@@ -503,7 +503,7 @@ func getCloudTestEndChecker(
 
 	srv := getTestServer(tb, map[string]http.Handler{
 		"POST ^/v1/tests$": testStart,
-		fmt.Sprintf("POST ^/v1/tests/%d$", testRunID): http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		fmt.Sprintf("POST ^/v1/tests/%d$", testRunID): http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
 			require.NotNil(tb, req.Body)
 			buf := &bytes.Buffer{}
 			_, err := io.Copy(buf, req.Body)
@@ -829,7 +829,7 @@ func injectMockSignalNotifier(ts *GlobalTestState) (sendSignal chan os.Signal) {
 			close(sendSignal)
 		}()
 	}
-	ts.GlobalState.SignalStop = func(c chan<- os.Signal) { /* noop */ }
+	ts.GlobalState.SignalStop = func(_ chan<- os.Signal) { /* noop */ }
 	return sendSignal
 }
 
@@ -1703,7 +1703,7 @@ func TestRunWithCloudOutputOverrides(t *testing.T) {
 		[]string{"-v", "--log-output=stdout", "--out=cloud", "--out", "json=results.json"}, 0,
 	)
 
-	configOverride := http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+	configOverride := http.HandlerFunc(func(resp http.ResponseWriter, _ *http.Request) {
 		resp.WriteHeader(http.StatusOK)
 		_, err := fmt.Fprint(resp, `{"reference_id": "132", "config": {"webAppURL": "https://bogus.url"}}`)
 		assert.NoError(t, err)
@@ -1841,7 +1841,6 @@ func TestPrometheusRemoteWriteOutput(t *testing.T) {
 func BenchmarkReadResponseBody(b *testing.B) {
 	httpSrv := httpmultibin.NewHTTPMultiBin(b)
 
-	//nolint:goconst
 	script := httpSrv.Replacer.Replace(`
 		import http from "k6/http";
 		import { check, sleep } from "k6";
@@ -2263,7 +2262,7 @@ func TestBrowserPermissions(t *testing.T) {
 			name:             "browser option not set",
 			options:          "",
 			expectedExitCode: 0,
-			expectedError:    "GoError: browser not found in registry. make sure to set browser type option in scenario definition in order to use the browser module",
+			expectedError:    "browser not found in registry. make sure to set browser type option in scenario definition in order to use the browser module",
 		},
 		// When we do supply the correct browser options,
 		// we expect that the browser module will start
@@ -2301,12 +2300,12 @@ func TestBrowserPermissions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			script := fmt.Sprintf(`
-			import { browser } from 'k6/experimental/browser';
+			import { browser } from 'k6/browser';
 
 			%s
 
 			export default function() {
-			  browser.isConnected();
+			  browser.isConnected()
 			};
 			`, tt.options)
 
@@ -2318,6 +2317,39 @@ func TestBrowserPermissions(t *testing.T) {
 			assert.Contains(t, loglines[0].Message, tt.expectedError)
 		})
 	}
+}
+
+func TestBrowserExperimentalImport(t *testing.T) {
+	t.Parallel()
+
+	const script = `
+		import { browser } from 'k6/experimental/browser';
+
+		export const options = {
+			scenarios: {
+					browser: {
+					executor: 'shared-iterations',
+					options: {
+						browser: {
+							type: 'chromium',
+						},
+					},
+				},
+			},
+		}
+
+		export default function() {
+			browser.isConnected()
+		};
+	`
+
+	const wantExitCode = 108
+	ts := getSingleFileTestState(t, script, []string{}, wantExitCode)
+	ts.Env["K6_BROWSER_EXECUTABLE_PATH"] = "k6-browser-fake-cmd"
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+	loglines := ts.LoggerHook.Drain()
+
+	assert.Contains(t, loglines[0].Message, "use k6/browser instead of k6/experimental/browser")
 }
 
 func TestSetupTimeout(t *testing.T) {
@@ -2350,4 +2382,33 @@ func TestSetupTimeout(t *testing.T) {
 	stderr := ts.Stderr.String()
 	t.Log(stderr)
 	assert.Contains(t, stderr, "setup() execution timed out after 1 seconds")
+}
+
+func TestTypeScriptSupport(t *testing.T) {
+	t.Parallel()
+	depScript := `
+		export default function(): number {
+			let p: number = 42;
+			return p;
+		}
+	`
+	mainScript := `
+		import bar from "./bar.ts";
+		let s: string = "something";
+		export default function() {
+			console.log(s, bar());
+		};
+	`
+
+	ts := NewGlobalTestState(t)
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.ts"), []byte(mainScript), 0o644))
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "bar.ts"), []byte(depScript), 0o644))
+
+	ts.CmdArgs = []string{"k6", "run", "--compatibility-mode", "experimental_enhanced", "--quiet", "test.ts"}
+
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	stderr := ts.Stderr.String()
+	t.Log(stderr)
+	assert.Contains(t, stderr, `something 42`)
 }

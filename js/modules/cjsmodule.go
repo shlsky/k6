@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
 )
 
 // cjsModule represents a commonJS module
 type cjsModule struct {
-	prg *goja.Program
+	prg *sobek.Program
 	url *url.URL
 }
 
@@ -19,7 +19,7 @@ var _ module = &cjsModule{}
 
 type cjsModuleInstance struct {
 	mod       *cjsModule
-	moduleObj *goja.Object
+	moduleObj *sobek.Object
 	vu        VU
 }
 
@@ -42,7 +42,7 @@ func (c *cjsModuleInstance) execute() error {
 	if err != nil {
 		return err
 	}
-	if call, ok := goja.AssertFunction(f); ok {
+	if call, ok := sobek.AssertFunction(f); ok {
 		if _, err = call(exports, c.moduleObj, exports); err != nil {
 			return err
 		}
@@ -51,7 +51,7 @@ func (c *cjsModuleInstance) execute() error {
 	return nil
 }
 
-func (c *cjsModuleInstance) exports() *goja.Object {
+func (c *cjsModuleInstance) exports() *sobek.Object {
 	exportsV := c.moduleObj.Get("exports")
 	if common.IsNullish(exportsV) {
 		return nil
@@ -65,9 +65,14 @@ func (c *cjsModuleInstance) exports() *goja.Object {
 // TODO: extract this to not make this package dependant on compilers.
 // this is potentially a moot point after ESM when the compiler will likely get mostly dropped.
 func cjsModuleFromString(fileURL *url.URL, data []byte, c *compiler.Compiler) (*cjsModule, error) {
-	pgm, _, err := c.Compile(string(data), fileURL.String(), false)
+	astProgram, _, err := c.Parse(string(data), fileURL.String(), true)
 	if err != nil {
 		return nil, err
 	}
+	pgm, err := sobek.CompileAST(astProgram, true)
+	if err != nil {
+		return nil, err
+	}
+
 	return &cjsModule{prg: pgm, url: fileURL}, nil
 }

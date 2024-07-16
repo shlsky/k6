@@ -5,10 +5,12 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/loader"
 )
+
+const notPreviouslyResolvedModule = "the module %q was not previously resolved during initialization (__VU==0)"
 
 // FileLoader is a type alias for a function that returns the contents of the referenced file.
 type FileLoader func(specifier *url.URL, name string) ([]byte, error)
@@ -19,7 +21,7 @@ type module interface {
 
 type moduleInstance interface {
 	execute() error
-	exports() *goja.Object
+	exports() *sobek.Object
 }
 type moduleCacheElement struct {
 	mod module
@@ -32,6 +34,7 @@ type ModuleResolver struct {
 	goModules map[string]interface{}
 	loadCJS   FileLoader
 	compiler  *compiler.Compiler
+	locked    bool
 }
 
 // NewModuleResolver returns a new module resolution instance that will resolve.
@@ -55,6 +58,9 @@ func (mr *ModuleResolver) resolveSpecifier(basePWD *url.URL, arg string) (*url.U
 }
 
 func (mr *ModuleResolver) requireModule(name string) (module, error) {
+	if mr.locked {
+		return nil, fmt.Errorf(notPreviouslyResolvedModule, name)
+	}
 	mod, ok := mr.goModules[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown module: %s", name)
@@ -81,6 +87,14 @@ func (mr *ModuleResolver) resolveLoaded(basePWD *url.URL, arg string, data []byt
 	return mod, err
 }
 
+// Lock locks the module's resolution from any further new resolving operation.
+// It means that it relays only its internal cache and on the fact that it has already
+// seen previously the module during the initialization.
+// It is the same approach used for opening file operations.
+func (mr *ModuleResolver) Lock() {
+	mr.locked = true
+}
+
 func (mr *ModuleResolver) resolve(basePWD *url.URL, arg string) (module, error) {
 	if cached, ok := mr.cache[arg]; ok {
 		return cached.mod, cached.err
@@ -102,6 +116,9 @@ func (mr *ModuleResolver) resolve(basePWD *url.URL, arg string) (module, error) 
 			return cached.mod, cached.err
 		}
 
+		if mr.locked {
+			return nil, fmt.Errorf(notPreviouslyResolvedModule, arg)
+		}
 		// Fall back to loading
 		data, err := mr.loadCJS(specifier, arg)
 		if err != nil {
@@ -145,7 +162,7 @@ func NewModuleSystem(resolver *ModuleResolver, vu VU) *ModuleSystem {
 }
 
 // Require is called when a module/file needs to be loaded by a script
-func (ms *ModuleSystem) Require(pwd *url.URL, arg string) (*goja.Object, error) {
+func (ms *ModuleSystem) Require(pwd *url.URL, arg string) (*sobek.Object, error) {
 	mod, err := ms.resolver.resolve(pwd, arg)
 	if err != nil {
 		return nil, err
@@ -168,12 +185,24 @@ func (ms *ModuleSystem) Require(pwd *url.URL, arg string) (*goja.Object, error) 
 // it will be used instead of reevaluating the source from the provided SourceData.
 //
 // TODO: this API will likely change as native ESM support will likely not let us have the exports
-// as one big goja.Value that we can manipulate
-func (ms *ModuleSystem) RunSourceData(source *loader.SourceData) (goja.Value, error) {
+// as one big sobek.Value that we can manipulate
+func (ms *ModuleSystem) RunSourceData(source *loader.SourceData) (sobek.Value, error) {
 	specifier := source.URL.String()
 	pwd := source.URL.JoinPath("../")
 	if _, err := ms.resolver.resolveLoaded(pwd, specifier, source.Data); err != nil {
 		return nil, err // TODO wrap as this should never happen
 	}
 	return ms.Require(pwd, specifier)
+}
+
+// ExportGloballyModule sets all exports of the provided module name on the globalThis.
+// effectively making them globally available
+func ExportGloballyModule(rt *sobek.Runtime, modSys *ModuleSystem, moduleName string) {
+	t, _ := modSys.Require(nil, moduleName)
+
+	for _, key := range t.Keys() {
+		if err := rt.Set(key, t.Get(key)); err != nil {
+			panic(fmt.Errorf("failed to set '%s' global object: %w", key, err))
+		}
+	}
 }

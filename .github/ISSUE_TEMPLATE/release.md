@@ -1,7 +1,7 @@
 ---
 name: k6 Release
 about: k6 release accommodates activities and a checklist with the k6 open-source release process.
-title: 'k6 release v0.4x.0'
+title: 'k6 release v0.5x.0'
 labels: ["release"]
 ---
 
@@ -14,9 +14,9 @@ labels: ["release"]
 ### At the beginning of the cycle
 
 - [ ] Obtain the Release coordinator's contact from the `@k6-browser` team and co-assign the issue to them.
-- [ ] Create a new `release-v0.4x.0` long-lived branch and add a new release notes file using the available [template](/grafana/k6/tree/master/release%20notes/template.md) to the [repository's `release notes` folder](/grafana/k6/tree/master/release%20notes).
-- [ ] Go through the potential [dependencies updates](Dependencies.md) and create a dedicated PR if any of them is relevant to this release.
-- [ ] Create a new `release-v0.4x.0` long-lived branch on the [grafana/k6-DefinitelyTyped](https://github.com/grafana/k6-DefinitelyTyped) fork repository.
+- [ ] Create a new `release-v0.5x.0` long-lived branch and add a new release notes file using the available [template](https://github.com/grafana/k6/blob/master/release%20notes/template.md) to the [repository's `release notes` folder](https://github.com/grafana/k6/blob/master/release%20notes).
+- [ ] Go through the potential [dependencies updates](https://github.com/grafana/k6/blob/master/Dependencies.md) and create a dedicated PR if any of them is relevant to this release.
+- [ ] Create a new `release-v0.5x.0` long-lived branch on the [grafana/k6-DefinitelyTyped](https://github.com/grafana/k6-DefinitelyTyped) fork repository.
     - [ ] Bump the version in [types/k6/package.json](https://github.com/grafana/k6-DefinitelyTyped/blob/master/types/k6/package.json#L4) to the next one.
 
 ### Release Preparation
@@ -31,9 +31,11 @@ labels: ["release"]
 - [ ] Ensure that all merged pull-requests referenced in the release notes are linked to the release milestone.
 - [ ] Ensure all pull-requests in the `k6-docs` repository, related to new or modified functionalities introduced by the new version have been created.
 - [ ] Ensure all PRs in the k6 repository, part of the current [milestone](https://github.com/grafana/k6/milestones), have been merged.
-- [ ] Open a PR with the release notes for the new version, and ask teams who might have contributed to the release (k6-browser, k6-ecosystem, k6-docs, k6-devrel teams, etc.) to contribute their notes and review the existing ones.
+- [ ] Open a PR with the release notes for the new version
+  - [ ] Ask teams who might have contributed to the release (k6-browser, k6-ecosystem, k6-docs, k6-devrel teams, etc.) to contribute their notes and review the existing ones.
+  - [ ] Remember to mention and thank [external contributors](https://github.com/search?q=user%3Agrafana+repo%3Ak6+milestone%3A%22v0.51.0%22+-author%3Amstoykov+-author%3Aoleiade+-author%3Ana--+-author%3Acodebien+-author%3Aolegbespalov+-author%3Aandrewslotin+-author%3Ajoanlopez+-author%3Aankur22+-author%3Ainancgumus+-author%3Aszkiba+-author%3Adependabot%5Bbot%5D&type=pullrequests). <-- Update the query with the correct milestone version.
 - [ ] Share the release notes PR with the k6 open-source teams. Request contributions from all affected teams (k6-browser, k6-chaos, k6-docs, k6-devrel, etc.) and any other stakeholders involved in the new release.
-- [ ] Open a separate pull-request for bumping [the k6 Go project's version](https://github.com/grafana/k6/blob/master/lib/consts/consts.go#L11).
+- [ ] Open a separate pull-request for bumping [the k6 Go project's version](https://github.com/grafana/k6/blob/master/lib/consts/consts.go#L11-L12).
 - [ ] Open a PR in the `DefinitelyTyped/DefinitelyTyped` repository, using the release branch created in the grafana/k6-DefinitelyTyped fork, to update the k6 type definitions for the new release.
 
 #### ~ 1 day before the release date
@@ -49,9 +51,10 @@ labels: ["release"]
 
 #### In k6 repository
 
-- [ ] Merge the PR bumping [the k6 Go project's version](https://github.com/grafana/k6/blob/9fa50b2d1f259cdccff5cc7bc18a236d31c345ac/lib/consts/consts.go#L11).
+- [ ] Merge the PR bumping [the k6 Go project's version](https://github.com/grafana/k6/blob/master/lib/consts/consts.go#L11-L12).
 - [ ] Merge the release notes PR.
-- [ ] Create and push a new tag of the form `vX.Y.Z` using git: `git tag v0.4x.0 -m "v0.4x.0"`.
+- [ ] Pull locally the previously merged changes.
+- [ ] Create and push a new tag of the form `vX.Y.Z` using git: `git tag v0.5x.0 -m "v0.5x.0"`.
 
 #### Announcements
 
